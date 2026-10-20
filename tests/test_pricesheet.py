@@ -116,6 +116,7 @@ def test_cli_live_save_and_load_account_prices(tmp_path, monkeypatch, capsys):
     sheet = PriceSheet.from_rows([row(meterId=meter_id, currencyCode="USD", unitPrice=10)], "test subscription")
     monkeypatch.setattr(PriceSheet, "download", lambda *args: sheet)
     monkeypatch.setattr(cli, "http_transport", lambda: None)
+    monkeypatch.setattr(cli, "az_current_subscription", lambda: "test-subscription")
     monkeypatch.setattr(
         cli, "_client", lambda args, currency: PriceClient(currency=currency, cache_dir=None, fetcher=fake_fetcher)
     )
