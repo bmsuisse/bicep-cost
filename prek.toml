@@ -1,0 +1,13 @@
+[[repos]]
+repo = "builtin"
+hooks = [{ id = "check-yaml" }]
+
+[[repos]]
+repo = "local"
+hooks = [
+    { id = "ruff-check", name = "Ruff strict lint", language = "system", entry = "uv run --locked --all-groups ruff check --fix", types = ["python"] },
+    { id = "ruff-format", name = "Ruff format", language = "system", entry = "uv run --locked --all-groups ruff format", types = ["python"] },
+    { id = "ruff-warn-any", name = "Warn about Any annotations", language = "system", entry = "uv run --locked --all-groups ruff check --select ANN401 --config lint.ignore=[] --exit-zero", types = ["python"] },
+    { id = "ty-check", name = "ty (warnings fail)", language = "system", entry = "uv run --locked --all-groups ty check --error-on-warning", pass_filenames = false, files = '(\.py$|pyproject\.toml$|uv\.lock$)' },
+    { id = "check-files", name = "File size guard", language = "system", entry = "uv run --locked --all-groups python scripts/check_files.py", types_or = ["python", "markdown", "yaml", "toml"] },
+]

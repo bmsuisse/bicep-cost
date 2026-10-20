@@ -2,7 +2,7 @@ from bicep_cost.model import Estimate, LineItem, ResourceEstimate
 from bicep_cost.report import render_chart, render_markdown
 
 
-def test_cost_chart_orders_scales_and_groups():
+def test_cost_chart_orders_scales_and_groups() -> None:
     from tests.conftest import make_resource
 
     rows = []
@@ -24,5 +24,5 @@ def test_cost_chart_orders_scales_and_groups():
     assert "```text" in render_markdown(est, "template", [])
 
 
-def test_empty_cost_chart():
+def test_empty_cost_chart() -> None:
     assert "no positive priced costs" in render_chart(Estimate("USD", "westeurope", [], [], []))

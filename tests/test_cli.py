@@ -8,14 +8,13 @@ import pytest
 from bicep_cost import cli
 from bicep_cost.compile import CompileError, load_input, parameters_from_arm, parse_set
 from bicep_cost.prices import PriceClient
-
-from .conftest import fake_fetcher
+from tests.conftest import fake_fetcher
 
 HOURS = 730
 
 
 @pytest.fixture(autouse=True)
-def fake_prices(monkeypatch):
+def fake_prices(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         cli,
         "_client",
@@ -23,13 +22,13 @@ def fake_prices(monkeypatch):
     )
 
 
-def run_cli(capsys, *argv: str) -> tuple[int, str, str]:
+def run_cli(capsys: pytest.CaptureFixture[str], *argv: str) -> tuple[int, str, str]:
     code = cli.main(list(argv))
     out = capsys.readouterr()
     return code, out.out, out.err
 
 
-def test_estimate_json_for_arm_template(capsys, fixtures_dir):
+def test_estimate_json_for_arm_template(capsys: pytest.CaptureFixture[str], fixtures_dir: Path) -> None:
     code, out, _ = run_cli(capsys, "estimate", str(fixtures_dir / "app.json"), "--format", "json")
     assert code == 0
     report = json.loads(out)
@@ -39,7 +38,7 @@ def test_estimate_json_for_arm_template(capsys, fixtures_dir):
     assert plan["items"][0]["quantity"] == pytest.approx(HOURS)
 
 
-def test_set_overrides_parameters(capsys, fixtures_dir):
+def test_set_overrides_parameters(capsys: pytest.CaptureFixture[str], fixtures_dir: Path) -> None:
     _, out, _ = run_cli(
         capsys,
         "estimate",
@@ -54,21 +53,21 @@ def test_set_overrides_parameters(capsys, fixtures_dir):
     assert json.loads(out)["total_monthly"] == pytest.approx(0.018 * HOURS * 3)
 
 
-def test_text_output_lists_unsupported_resources(capsys, fixtures_dir):
+def test_text_output_lists_unsupported_resources(capsys: pytest.CaptureFixture[str], fixtures_dir: Path) -> None:
     code, out, _ = run_cli(capsys, "estimate", str(fixtures_dir / "app.json"))
     assert code == 0
     assert "TOTAL per month" in out
     assert "Microsoft.Cdn/profiles" in out
 
 
-def test_strict_and_fail_above_exit_codes(capsys, fixtures_dir):
+def test_strict_and_fail_above_exit_codes(capsys: pytest.CaptureFixture[str], fixtures_dir: Path) -> None:
     path = str(fixtures_dir / "app.json")
     assert run_cli(capsys, "estimate", path, "--strict")[0] == 2
     assert run_cli(capsys, "estimate", path, "--fail-above", "10")[0] == 3
     assert run_cli(capsys, "estimate", path, "--fail-above", "10000")[0] == 0
 
 
-def test_markdown_and_csv(capsys, fixtures_dir):
+def test_markdown_and_csv(capsys: pytest.CaptureFixture[str], fixtures_dir: Path) -> None:
     path = str(fixtures_dir / "app.json")
     _, md, _ = run_cli(capsys, "estimate", path, "--format", "markdown")
     assert "| **Total** |" in md
@@ -76,7 +75,7 @@ def test_markdown_and_csv(capsys, fixtures_dir):
     assert csv_out.splitlines()[0].startswith("address,type,status")
 
 
-def test_output_file(tmp_path, capsys, fixtures_dir):
+def test_output_file(tmp_path: Path, capsys: pytest.CaptureFixture[str], fixtures_dir: Path) -> None:
     target = tmp_path / "r.json"
     code, out, _ = run_cli(capsys, "estimate", str(fixtures_dir / "app.json"), "--format", "json", "-o", str(target))
     assert code == 0
@@ -84,7 +83,7 @@ def test_output_file(tmp_path, capsys, fixtures_dir):
     assert json.loads(target.read_text())["currency"] == "USD"
 
 
-def test_diff_between_two_reports(tmp_path, capsys, fixtures_dir):
+def test_diff_between_two_reports(tmp_path: Path, capsys: pytest.CaptureFixture[str], fixtures_dir: Path) -> None:
     path = str(fixtures_dir / "app.json")
     a, b = tmp_path / "a.json", tmp_path / "b.json"
     run_cli(capsys, "estimate", path, "--format", "json", "-o", str(a))
@@ -95,19 +94,19 @@ def test_diff_between_two_reports(tmp_path, capsys, fixtures_dir):
     assert "+129.94/month" in out
 
 
-def test_missing_bicep_input_reports_error(capsys, tmp_path):
+def test_missing_bicep_input_reports_error(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
     code, _, err = run_cli(capsys, "estimate", str(tmp_path / "nope.txt"))
     assert code == 1
     assert "unsupported input" in err
 
 
-def test_prices_subcommand(capsys):
+def test_prices_subcommand(capsys: pytest.CaptureFixture[str]) -> None:
     code, out, _ = run_cli(capsys, "prices", "--service", "Key Vault", "--meter", "Operations")
     assert code == 0
     assert "Operations" in out
 
 
-def test_parameter_file_parsing(monkeypatch):
+def test_parameter_file_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AZURE_ENV_NAME", "prd")
     monkeypatch.delenv("MISSING_VAR", raising=False)
     params = parameters_from_arm(
@@ -128,7 +127,7 @@ def test_parameter_file_parsing(monkeypatch):
     assert type(params["d"]).__name__ == "Unknown"
 
 
-def test_parse_set():
+def test_parse_set() -> None:
     assert parse_set(["a=1", "b=text", 'c={"x": true}']) == {"a": 1, "b": "text", "c": {"x": True}}
     with pytest.raises(CompileError):
         parse_set(["novalue"])
@@ -141,7 +140,7 @@ needs_bicep = pytest.mark.skipif(
 
 
 @needs_bicep
-def test_bicep_and_bicepparam_compile(capsys, fixtures_dir):
+def test_bicep_and_bicepparam_compile(capsys: pytest.CaptureFixture[str], fixtures_dir: Path) -> None:
     code, out, _ = run_cli(capsys, "estimate", str(fixtures_dir / "main.bicep"), "--format", "json")
     assert code == 0
     assert json.loads(out)["total_monthly"] == pytest.approx(0.178 * HOURS * 2)
@@ -162,18 +161,18 @@ def test_bicep_and_bicepparam_compile(capsys, fixtures_dir):
     assert json.loads(out)["total_monthly"] == pytest.approx(0.018 * HOURS * 2)
 
 
-def test_load_input_rejects_param_and_bicepparam_together(fixtures_dir):
+def test_load_input_rejects_param_and_bicepparam_together(fixtures_dir: Path) -> None:
     with pytest.raises(CompileError):
         load_input(fixtures_dir / "prod.bicepparam", fixtures_dir / "prod.bicepparam", [])
 
 
-def test_subprocess_entrypoint_runs():
+def test_subprocess_entrypoint_runs() -> None:
     proc = subprocess.run(["python", "-m", "bicep_cost.cli", "--help"], capture_output=True, text=True, check=False)
     assert proc.returncode == 0
     assert "estimate" in proc.stdout
 
 
-def test_diff_rejects_mixed_currencies(tmp_path, capsys, fixtures_dir):
+def test_diff_rejects_mixed_currencies(tmp_path: Path, capsys: pytest.CaptureFixture[str], fixtures_dir: Path) -> None:
     path = str(fixtures_dir / "app.json")
     usd, chf = tmp_path / "usd.json", tmp_path / "chf.json"
     run_cli(capsys, "estimate", path, "--format", "json", "-o", str(usd))
@@ -183,7 +182,7 @@ def test_diff_rejects_mixed_currencies(tmp_path, capsys, fixtures_dir):
     assert "different currencies" in err
 
 
-def test_markdown_lists_external_resources(capsys, tmp_path):
+def test_markdown_lists_external_resources(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
     template = {
         "resources": [
             {
@@ -203,7 +202,7 @@ def test_markdown_lists_external_resources(capsys, tmp_path):
     assert "site" in out
 
 
-def test_invalid_usage_value_is_a_clean_error(capsys, tmp_path):
+def test_invalid_usage_value_is_a_clean_error(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
     template = {
         "resources": [
             {
@@ -228,7 +227,9 @@ def test_invalid_usage_value_is_a_clean_error(capsys, tmp_path):
 
 
 @pytest.mark.parametrize("currency", [None, "chf"])
-def test_usage_currency_default_and_conflict(currency, tmp_path, capsys):
+def test_usage_currency_default_and_conflict(
+    currency: str | None, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     template = tmp_path / "empty.json"
     template.write_text('{"resources": []}')
     usage = tmp_path / "empty.usage.toml"
@@ -256,7 +257,15 @@ def test_usage_currency_default_and_conflict(currency, tmp_path, capsys):
         (100, 100, 0, 100, 0),
     ],
 )
-def test_diff_budget_caps(old, new, percent, cap, expected, tmp_path, capsys):
+def test_diff_budget_caps(
+    old: float,
+    new: float,
+    percent: float,
+    cap: float | None,
+    expected: float,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     base, head = tmp_path / "base.json", tmp_path / "head.json"
     for path, amount in ((base, old), (head, new)):
         path.write_text(json.dumps({"resources": [], "currency": "USD", "source": "test", "total_monthly": amount}))
@@ -266,7 +275,9 @@ def test_diff_budget_caps(old, new, percent, cap, expected, tmp_path, capsys):
     assert "Cost change" in out
 
 
-def test_estimate_relative_cap_writes_report(tmp_path, capsys, fixtures_dir):
+def test_estimate_relative_cap_writes_report(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], fixtures_dir: Path
+) -> None:
     template = str(fixtures_dir / "app.json")
     base, head = tmp_path / "base.json", tmp_path / "head.json"
     run_cli(capsys, "estimate", template, "--format", "json", "-o", str(base))
@@ -295,14 +306,14 @@ def test_estimate_relative_cap_writes_report(tmp_path, capsys, fixtures_dir):
 
 
 @pytest.mark.parametrize("value", ["nan", "inf", "-1"])
-def test_budget_rejects_invalid_threshold(value):
+def test_budget_rejects_invalid_threshold(value: str) -> None:
     with pytest.raises(SystemExit) as exc:
         cli.build_parser().parse_args(["estimate", "t.json", f"--fail-increase-percent={value}"])
     assert exc.value.code == 2
 
 
 @pytest.mark.parametrize("total", [-1, float("nan"), float("inf"), True, "100"])
-def test_baseline_rejects_invalid_totals(total, tmp_path, capsys):
+def test_baseline_rejects_invalid_totals(total: object, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     path = tmp_path / "base.json"
     path.write_text(json.dumps({"resources": [], "total_monthly": total, "source": "x", "currency": "USD"}))
     code, out, err = run_cli(
@@ -313,7 +324,7 @@ def test_baseline_rejects_invalid_totals(total, tmp_path, capsys):
     assert "finite nonnegative" in err
 
 
-def test_chart_survives_budget_failure(capsys, fixtures_dir):
+def test_chart_survives_budget_failure(capsys: pytest.CaptureFixture[str], fixtures_dir: Path) -> None:
     for format_ in ("text", "markdown"):
         code, out, _ = run_cli(
             capsys, "estimate", str(fixtures_dir / "app.json"), "--format", format_, "--fail-above", "1"

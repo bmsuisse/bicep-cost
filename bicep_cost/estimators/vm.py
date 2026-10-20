@@ -2,12 +2,12 @@
 
 import re
 
-from ..armexpr import JsonValue
-from ..context import HOURS_PER_MONTH, EstimateContext, Unresolved, as_number, need_str
-from ..engine import Resource
-from ..model import LineItem, ResourceEstimate
-from ..prices import Meter, NoPriceFound
-from .common import line, priced
+from bicep_cost.armexpr import JsonValue
+from bicep_cost.context import HOURS_PER_MONTH, EstimateContext, UnresolvedError, as_number, need_str
+from bicep_cost.engine import Resource
+from bicep_cost.estimators.common import line, priced
+from bicep_cost.model import LineItem, ResourceEstimate
+from bicep_cost.prices import Meter, NoPriceFoundError
 
 # (max size in GiB, tier number) for managed disk SKUs.
 SSD_TIERS = [
@@ -43,12 +43,14 @@ def disk_label(account_type: str, size_gb: float) -> tuple[str, str]:
     """(product, SKU like ``P10 LRS``) for a managed disk of at least ``size_gb``."""
     spec = DISK_TYPES.get(account_type.lower())
     if spec is None:
-        raise Unresolved(f"managed disk type {account_type!r} is not priced (Ultra / Premium SSD v2 are not supported)")
+        raise UnresolvedError(
+            f"managed disk type {account_type!r} is not priced (Ultra / Premium SSD v2 are not supported)"
+        )
     product, letter, redundancy, tiers = spec
     for max_gb, number in tiers:
         if size_gb <= max_gb:
             return product, f"{letter}{number} {redundancy}"
-    raise Unresolved(f"disk size {size_gb:g} GB exceeds the largest managed disk")
+    raise UnresolvedError(f"disk size {size_gb:g} GB exceeds the largest managed disk")
 
 
 def disk_item(
@@ -58,13 +60,13 @@ def disk_item(
     meters = ctx.meters("Storage", region, product=product, sku=sku)
     meter = next((m for m in meters if m.name.endswith(" Disk")), None)
     if meter is None:
-        raise NoPriceFound(f"no managed disk price for {product} {sku} in {region}")
+        raise NoPriceFoundError(f"no managed disk price for {product} {sku} in {region}")
     return line(f"{what}: {sku} ({size_gb:g} GB)" + (f" x{count:g}" if count != 1 else ""), meter, count)
 
 
 def _is_windows(profile: dict[str, JsonValue]) -> bool:
     os_profile = profile.get("osProfile")
-    if isinstance(os_profile, dict) and "windowsConfiguration" in {k for k in os_profile}:
+    if isinstance(os_profile, dict) and "windowsConfiguration" in set(os_profile):
         return True
     storage = profile.get("storageProfile")
     if isinstance(storage, dict):
@@ -87,10 +89,10 @@ def _vm_meter(ctx: EstimateContext, region: str, size: str, windows: bool, spot:
 
     pick = [m for m in meters if kind(m) == (windows, spot, False)]
     if not pick:
-        raise NoPriceFound(
+        raise NoPriceFoundError(
             f"no VM price for {size}{' Spot' if spot else ''} ({'Windows' if windows else 'Linux'}) in {region}"
         )
-    return sorted(pick, key=lambda m: (m.product, m.sku))[0]
+    return min(pick, key=lambda m: (m.product, m.sku))
 
 
 def _license_notes(profile: dict[str, JsonValue], windows: bool, license_type: str) -> list[str]:
@@ -198,7 +200,7 @@ def estimate_disk(res: Resource, ctx: EstimateContext) -> ResourceEstimate:
     account = need_str(res, "sku.name", "disk SKU")
     size = as_number(res.get("properties.diskSizeGB"), 0.0)
     if size <= 0:
-        raise Unresolved(f"disk size of {res.name} is not known")
+        raise UnresolvedError(f"disk size of {res.name} is not known")
     region = ctx.region(res)
     return priced(res, [disk_item(ctx, region, "managed disk", account, size)])
 

@@ -2,20 +2,22 @@ import pytest
 
 from bicep_cost.armexpr import JsonValue
 from bicep_cost.calc import estimate_resources
+from bicep_cost.engine import Resource
 from bicep_cost.estimators.vm import disk_label
+from bicep_cost.model import Estimate
+from bicep_cost.prices import PriceClient
 from bicep_cost.usage import UsageConfig
-
-from .conftest import make_resource
+from tests.conftest import make_resource
 
 HOURS = 730
 GB = 2**30
 
 
-def run(prices, resources, usage=None):
+def run(prices: PriceClient, resources: list[Resource], usage: dict[str, object] | None = None) -> Estimate:
     return estimate_resources(resources, prices, UsageConfig(usage or {}))
 
 
-def db(sku: str, **props: JsonValue):
+def db(sku: str, **props: JsonValue) -> Resource:
     return make_resource(
         "Microsoft.Sql/servers/databases",
         "srv/db",
@@ -23,25 +25,25 @@ def db(sku: str, **props: JsonValue):
     )
 
 
-def test_vcore_database_prices_whole_size_row_even_when_skus_share_a_meter_id(prices):
+def test_vcore_database_prices_whole_size_row_even_when_skus_share_a_meter_id(prices: PriceClient) -> None:
     est = run(prices, [db("GP_Gen5_2", maxSizeBytes=32 * GB)])
     assert est.monthly == pytest.approx(0.3349 * HOURS + 32 * 0.13685)
     est4 = run(prices, [db("GP_Gen5_4", maxSizeBytes=32 * GB)])
     assert est4.monthly == pytest.approx(0.6697 * HOURS + 32 * 0.13685)
 
 
-def test_vcore_without_whole_size_row_falls_back_to_per_vcore(prices):
+def test_vcore_without_whole_size_row_falls_back_to_per_vcore(prices: PriceClient) -> None:
     est = run(prices, [db("GP_Gen5_6", maxSizeBytes=32 * GB)])
     assert est.monthly == pytest.approx(6 * 0.1674 * HOURS + 32 * 0.13685)
 
 
-def test_zone_redundant_adds_compute_and_uses_zr_storage_or_reports_missing_price(prices):
+def test_zone_redundant_adds_compute_and_uses_zr_storage_or_reports_missing_price(prices: PriceClient) -> None:
     est = run(prices, [db("GP_Gen5_2", maxSizeBytes=32 * GB, zoneRedundant=True)])
     status = est.resources[0].status
     assert status in ("priced", "unresolved")  # catalog has no zone-redundant storage row -> clean "unresolved"
 
 
-def test_serverless_uses_measured_vcore_hours_and_dtu_models(prices):
+def test_serverless_uses_measured_vcore_hours_and_dtu_models(prices: PriceClient) -> None:
     sl = db("GP_S_Gen5_2", maxSizeBytes=32 * GB)
     est = run(prices, [sl], {"sqldatabases": {"srv/db": {"vcore_hours": 200}}})
     assert est.monthly == pytest.approx(200 * 0.5739 + 32 * 0.13685)
@@ -52,7 +54,7 @@ def test_serverless_uses_measured_vcore_hours_and_dtu_models(prices):
     assert big.monthly == pytest.approx(0.4839 * 730 / 24 + 250 * 0.221)
 
 
-def test_database_in_pool_is_included_and_pool_is_priced(prices):
+def test_database_in_pool_is_included_and_pool_is_priced(prices: PriceClient) -> None:
     member = db("ElasticPool", elasticPoolId="/x/pool")
     pool = make_resource(
         "Microsoft.Sql/servers/elasticPools",
@@ -64,13 +66,19 @@ def test_database_in_pool_is_included_and_pool_is_priced(prices):
     assert est.monthly == pytest.approx(100 * 0.0725 * 730 / 24)
 
 
-def test_sql_server_and_children_are_free(prices):
+def test_sql_server_and_children_are_free(prices: PriceClient) -> None:
     server = make_resource("Microsoft.Sql/servers", "srv", {"location": "westeurope"})
     rule = make_resource("Microsoft.Sql/servers/firewallRules", "srv/r", {})
     assert run(prices, [server, rule]).monthly == 0
 
 
-def vm(size="Standard_D2s_v5", windows=False, os_disk=None, data=None, **profile):
+def vm(
+    size: str = "Standard_D2s_v5",
+    windows: bool = False,
+    os_disk: dict[str, JsonValue] | None = None,
+    data: list[JsonValue] | None = None,
+    **profile: JsonValue,
+) -> Resource:
     props: dict[str, JsonValue] = {
         "hardwareProfile": {"vmSize": size},
         "storageProfile": {"osDisk": {"createOption": "FromImage", **(os_disk or {})}, "dataDisks": data or []},
@@ -81,26 +89,26 @@ def vm(size="Standard_D2s_v5", windows=False, os_disk=None, data=None, **profile
     return make_resource("Microsoft.Compute/virtualMachines", "vm", {"location": "westeurope", "properties": props})
 
 
-def test_linux_vm_with_default_os_disk(prices):
+def test_linux_vm_with_default_os_disk(prices: PriceClient) -> None:
     est = run(prices, [vm()])
     assert est.monthly == pytest.approx(0.115 * HOURS + 5.8)  # 30 GB -> P4
     assert any("OS disk size not set" in n for n in est.resources[0].notes)
 
 
-def test_windows_license_and_hybrid_benefit(prices):
-    disk = {"diskSizeGB": 128, "managedDisk": {"storageAccountType": "Premium_LRS"}}
+def test_windows_license_and_hybrid_benefit(prices: PriceClient) -> None:
+    disk: dict[str, JsonValue] = {"diskSizeGB": 128, "managedDisk": {"storageAccountType": "Premium_LRS"}}
     assert run(prices, [vm(windows=True, os_disk=disk)]).monthly == pytest.approx(0.207 * HOURS + 21.68)
     ahb = run(prices, [vm(windows=True, os_disk=disk, licenseType="Windows_Server")])
     assert ahb.monthly == pytest.approx(0.115 * HOURS + 21.68)
 
 
-def test_spot_vm_ignores_low_priority_and_regular_rows(prices):
-    disk = {"diskSizeGB": 32, "managedDisk": {"storageAccountType": "Premium_LRS"}}
+def test_spot_vm_ignores_low_priority_and_regular_rows(prices: PriceClient) -> None:
+    disk: dict[str, JsonValue] = {"diskSizeGB": 32, "managedDisk": {"storageAccountType": "Premium_LRS"}}
     assert run(prices, [vm(os_disk=disk, priority="Spot")]).monthly == pytest.approx(0.0213 * HOURS + 5.8)
 
 
-def test_running_hours_override_and_data_disks(prices):
-    data = [
+def test_running_hours_override_and_data_disks(prices: PriceClient) -> None:
+    data: list[JsonValue] = [
         {
             "lun": 0,
             "diskSizeGB": 100,
@@ -109,31 +117,31 @@ def test_running_hours_override_and_data_disks(prices):
         },
         {"lun": 1, "diskSizeGB": 100, "createOption": "Empty", "managedDisk": {"storageAccountType": "Standard_LRS"}},
     ]
-    disk = {"diskSizeGB": 32, "managedDisk": {"storageAccountType": "Premium_LRS"}}
+    disk: dict[str, JsonValue] = {"diskSizeGB": 32, "managedDisk": {"storageAccountType": "Premium_LRS"}}
     est = run(prices, [vm(os_disk=disk, data=data)], {"virtualmachines": {"vm": {"hours_per_month": 100}}})
     assert est.monthly == pytest.approx(0.115 * 100 + 5.8 + 9.6 + 5.888)
     assert est.usage == pytest.approx(0.115 * 100)  # running hours are an assumption, disks are not
     assert any("HDD transaction" in n for n in est.resources[0].notes)
 
 
-def test_attached_data_disk_that_is_its_own_resource_is_not_counted_twice(prices):
+def test_attached_data_disk_that_is_its_own_resource_is_not_counted_twice(prices: PriceClient) -> None:
     disk = make_resource(
         "Microsoft.Compute/disks",
         "d1",
         {"location": "westeurope", "sku": {"name": "Premium_LRS"}, "properties": {"diskSizeGB": 128}},
     )
-    data = [{"lun": 0, "createOption": "Attach", "managedDisk": {"id": disk.id}}]
-    os_disk = {"diskSizeGB": 32, "managedDisk": {"storageAccountType": "Premium_LRS"}}
+    data: list[JsonValue] = [{"lun": 0, "createOption": "Attach", "managedDisk": {"id": disk.id}}]
+    os_disk: dict[str, JsonValue] = {"diskSizeGB": 32, "managedDisk": {"storageAccountType": "Premium_LRS"}}
     est = run(prices, [vm(os_disk=os_disk, data=data), disk])
     assert est.monthly == pytest.approx(0.115 * HOURS + 5.8 + 21.68)
 
 
-def test_ephemeral_os_disk_has_no_disk_charge(prices):
+def test_ephemeral_os_disk_has_no_disk_charge(prices: PriceClient) -> None:
     est = run(prices, [vm(os_disk={"diffDiskSettings": {"option": "Local"}})])
     assert est.monthly == pytest.approx(0.115 * HOURS)
 
 
-def test_scale_set_multiplies_instances_and_accepts_override(prices):
+def test_scale_set_multiplies_instances_and_accepts_override(prices: PriceClient) -> None:
     vmss = make_resource(
         "Microsoft.Compute/virtualMachineScaleSets",
         "ss",
@@ -171,11 +179,11 @@ def test_scale_set_multiplies_instances_and_accepts_override(prices):
         ("Premium_LRS", 1024, "P30 LRS"),
     ],
 )
-def test_disk_tier_is_the_smallest_that_fits(kind, size, expected):
+def test_disk_tier_is_the_smallest_that_fits(kind: str, size: int, expected: float) -> None:
     assert disk_label(kind, size)[1] == expected
 
 
-def test_unsupported_disk_types_are_unresolved_not_wrong(prices):
+def test_unsupported_disk_types_are_unresolved_not_wrong(prices: PriceClient) -> None:
     ultra = make_resource(
         "Microsoft.Compute/disks",
         "u",
@@ -184,7 +192,7 @@ def test_unsupported_disk_types_are_unresolved_not_wrong(prices):
     assert run(prices, [ultra]).resources[0].status == "unresolved"
 
 
-def test_public_ips_and_free_vm_children(prices):
+def test_public_ips_and_free_vm_children(prices: PriceClient) -> None:
     std = make_resource(
         "Microsoft.Network/publicIPAddresses",
         "ip",
@@ -200,7 +208,7 @@ def test_public_ips_and_free_vm_children(prices):
     assert est.monthly == pytest.approx((0.005 + 0.004) * HOURS)
 
 
-def test_postgres_vcore_product_uses_whole_node_row_not_an_arbitrary_one(prices):
+def test_postgres_vcore_product_uses_whole_node_row_not_an_arbitrary_one(prices: PriceClient) -> None:
     pg = make_resource(
         "Microsoft.DBforPostgreSQL/flexibleServers",
         "pg",
@@ -213,7 +221,7 @@ def test_postgres_vcore_product_uses_whole_node_row_not_an_arbitrary_one(prices)
     assert run(prices, [pg]).monthly == pytest.approx(0.424 * HOURS + 32 * 0.1369)
 
 
-def test_postgres_backup_above_free_allowance(prices):
+def test_postgres_backup_above_free_allowance(prices: PriceClient) -> None:
     pg = make_resource(
         "Microsoft.DBforPostgreSQL/flexibleServers",
         "pg",

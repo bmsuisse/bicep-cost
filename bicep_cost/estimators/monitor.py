@@ -2,10 +2,10 @@
 
 import re
 
-from ..context import EstimateContext, Unresolved, as_number, need_str
-from ..engine import Resource
-from ..model import LineItem, ResourceEstimate
-from .common import free, included, line, priced
+from bicep_cost.context import EstimateContext, UnresolvedError, as_number, need_str
+from bicep_cost.engine import Resource
+from bicep_cost.estimators.common import free, included, line, priced
+from bicep_cost.model import LineItem, ResourceEstimate
 
 WORKSPACE = "Microsoft.OperationalInsights/workspaces"
 
@@ -43,7 +43,7 @@ def estimate_workspace(res: Resource, ctx: EstimateContext) -> ResourceEstimate:
     elif sku.lower() == "free":
         return free(res, "Free tier (500 MB/day cap, 7 days retention)")
     else:
-        raise Unresolved(f"Log Analytics SKU {sku!r} is not priced")
+        raise UnresolvedError(f"Log Analytics SKU {sku!r} is not priced")
     if retention > 31:
         retention_m = ctx.meter("Log Analytics", region, meter="Analytics Logs Data Retention")
         extra_gb_months = total_ingest * (retention - 31) / 30
@@ -92,7 +92,7 @@ def estimate_app_insights(res: Resource, ctx: EstimateContext) -> ResourceEstima
 def _minutes(iso: str) -> int:
     m = re.fullmatch(r"P(?:T(?:(\d+)H)?(?:(\d+)M)?)?", iso.upper())
     if not m or iso.upper() == "PT":
-        raise Unresolved(f"cannot read frequency {iso!r}")
+        raise UnresolvedError(f"cannot read frequency {iso!r}")
     return int(m.group(1) or 0) * 60 + int(m.group(2) or 0)
 
 

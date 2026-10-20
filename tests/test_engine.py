@@ -1,14 +1,14 @@
-from bicep_cost.armexpr import Unknown
+from bicep_cost.armexpr import JsonValue, Unknown
 from bicep_cost.engine import DeploymentSettings, Engine
 
 
-def expand(template: dict, parameters: dict | None = None) -> Engine:
+def expand(template: dict[str, JsonValue], parameters: dict[str, JsonValue] | None = None) -> Engine:
     engine = Engine(DeploymentSettings())
     engine.expand(template, parameters or {})
     return engine
 
 
-def test_copy_condition_and_variables():
+def test_copy_condition_and_variables() -> None:
     engine = expand(
         {
             "parameters": {
@@ -35,7 +35,7 @@ def test_copy_condition_and_variables():
     assert [r.name for r in engine.resources] == ["st0", "st1", "st2"]
 
 
-def test_property_copy_loops():
+def test_property_copy_loops() -> None:
     engine = expand(
         {
             "variables": {"rules": ["x", "y"]},
@@ -59,7 +59,7 @@ def test_property_copy_loops():
     assert engine.resources[0].get("properties.rules") == [{"id": "x"}, {"id": "y"}]
 
 
-def _module(name: str, params: dict, template: dict) -> dict:
+def _module(name: str, params: dict[str, JsonValue], template: dict[str, JsonValue]) -> dict[str, JsonValue]:
     return {
         "type": "Microsoft.Resources/deployments",
         "name": name,
@@ -72,8 +72,8 @@ def _module(name: str, params: dict, template: dict) -> dict:
     }
 
 
-def test_nested_module_params_defaults_and_outputs():
-    inner_a = {
+def test_nested_module_params_defaults_and_outputs() -> None:
+    inner_a: dict[str, JsonValue] = {
         "parameters": {
             "size": {"type": "string"},
             "loc": {"type": "string", "defaultValue": "[resourceGroup().location]"},
@@ -88,7 +88,7 @@ def test_nested_module_params_defaults_and_outputs():
         ],
         "outputs": {"planId": {"type": "string", "value": "[resourceId('Microsoft.Web/serverfarms', 'plan')]"}},
     }
-    inner_b = {
+    inner_b: dict[str, JsonValue] = {
         "parameters": {"planId": {"type": "string"}},
         "resources": [
             {"type": "Microsoft.Web/sites", "name": "site", "properties": {"serverFarmId": "[parameters('planId')]"}}
@@ -111,8 +111,8 @@ def test_nested_module_params_defaults_and_outputs():
     assert plan.module_path == ("a",)
 
 
-def test_parameter_entry_can_be_an_expression_yielding_value():
-    inner = {
+def test_parameter_entry_can_be_an_expression_yielding_value() -> None:
+    inner: dict[str, JsonValue] = {
         "parameters": {"name": {"type": "string"}},
         "resources": [{"type": "Microsoft.KeyVault/vaults", "name": "[parameters('name')]"}],
     }
@@ -133,7 +133,7 @@ def test_parameter_entry_can_be_an_expression_yielding_value():
     assert [r.name for r in engine.resources if r.type == "Microsoft.KeyVault/vaults"] == ["generated"]
 
 
-def test_unknown_name_gets_placeholder_and_warning():
+def test_unknown_name_gets_placeholder_and_warning() -> None:
     engine = expand(
         {
             "parameters": {"n": {"type": "string"}},
@@ -144,7 +144,7 @@ def test_unknown_name_gets_placeholder_and_warning():
     assert engine.diagnostics
 
 
-def test_reference_to_resource_in_template_returns_declared_properties():
+def test_reference_to_resource_in_template_returns_declared_properties() -> None:
     engine = expand(
         {
             "resources": [
@@ -165,8 +165,8 @@ def test_reference_to_resource_in_template_returns_declared_properties():
     assert isinstance(site.properties["key"], Unknown)
 
 
-def test_subscription_scope_resource_group_override():
-    inner = {
+def test_subscription_scope_resource_group_override() -> None:
+    inner: dict[str, JsonValue] = {
         "resources": [
             {"type": "Microsoft.Storage/storageAccounts", "name": "s", "location": "[resourceGroup().location]"}
         ],
@@ -180,7 +180,7 @@ def test_subscription_scope_resource_group_override():
     assert "/resourceGroups/my-rg/" in res.id
 
 
-def test_absurd_copy_counts_are_refused():
+def test_absurd_copy_counts_are_refused() -> None:
     engine = expand(
         {
             "resources": [

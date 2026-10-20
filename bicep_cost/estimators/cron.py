@@ -6,7 +6,8 @@ HOURS_PER_MONTH = 730.0
 
 def _expand(field: str, lo: int, hi: int) -> set[int]:
     values: set[int] = set()
-    for part in field.split(","):
+    for raw_part in field.split(","):
+        part = raw_part
         step = 1
         if "/" in part:
             part, step_s = part.split("/", 1)

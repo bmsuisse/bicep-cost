@@ -2,11 +2,11 @@
 
 import re
 
-from ..context import EstimateContext, Unresolved, need_str
-from ..engine import Resource
-from ..model import LineItem, ResourceEstimate
-from ..prices import Meter
-from .common import included, line, priced
+from bicep_cost.context import EstimateContext, UnresolvedError, need_str
+from bicep_cost.engine import Resource
+from bicep_cost.estimators.common import included, line, priced
+from bicep_cost.model import LineItem, ResourceEstimate
+from bicep_cost.prices import Meter
 
 REDUNDANCY = {
     "lrs": "LRS",
@@ -24,7 +24,7 @@ def _pick(meters: tuple[Meter, ...], *, contains: str, excludes: tuple[str, ...]
         for m in meters
         if contains.lower() in m.name.lower() and not any(x.lower() in m.name.lower() for x in excludes)
     ]
-    return sorted(matches, key=lambda m: (len(m.name), m.name))[0] if matches else None
+    return min(matches, key=lambda m: (len(m.name), m.name)) if matches else None
 
 
 def estimate_account(res: Resource, ctx: EstimateContext) -> ResourceEstimate:
@@ -36,7 +36,7 @@ def estimate_account(res: Resource, ctx: EstimateContext) -> ResourceEstimate:
         return ResourceEstimate(res, "unsupported", notes=[f"Premium storage ({sku_name}) is not priced"])
     redundancy = REDUNDANCY.get(redundancy_part.lower().replace("-", ""))
     if redundancy is None:
-        raise Unresolved(f"unrecognised storage redundancy in {sku_name!r}")
+        raise UnresolvedError(f"unrecognised storage redundancy in {sku_name!r}")
     access_tier = res.get("properties.accessTier") or "Hot"
     if not isinstance(access_tier, str) or access_tier.capitalize() not in ("Hot", "Cool", "Cold"):
         access_tier = "Hot"
@@ -51,7 +51,7 @@ def estimate_account(res: Resource, ctx: EstimateContext) -> ResourceEstimate:
     sku = f"{access_tier} {redundancy}"
     meters = ctx.meters("Storage", region, product=product, sku=sku)
     if not meters:
-        raise Unresolved(f"no storage price for {product} / {sku} in {region}")
+        raise UnresolvedError(f"no storage price for {product} / {sku} in {region}")
 
     stored_gb = ctx.usage.number("storage", res.name, "stored_gb", 10.0)
     write_ops = ctx.usage.number("storage", res.name, "write_operations_10k", 10.0)
@@ -90,7 +90,7 @@ def estimate_share(res: Resource, ctx: EstimateContext) -> ResourceEstimate:
         return ResourceEstimate(res, "unsupported", notes=["Premium file shares are not priced"])
     redundancy = REDUNDANCY.get(redundancy_part.lower().replace("-", ""))
     if redundancy is None:
-        raise Unresolved(f"unrecognised storage redundancy in {sku_name!r}")
+        raise UnresolvedError(f"unrecognised storage redundancy in {sku_name!r}")
     share_tier = str(res.get("properties.accessTier") or "TransactionOptimized")
     tier_label = {"hot": "Hot", "cool": "Cool"}.get(share_tier.lower(), "Standard")
     region = ctx.region(account)

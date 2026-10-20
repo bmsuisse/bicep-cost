@@ -3,10 +3,10 @@
 import re
 from dataclasses import dataclass
 
-from ..context import HOURS_PER_MONTH, SECONDS_PER_MONTH, EstimateContext, Unresolved, as_number, need_str
-from ..engine import Resource
-from ..model import LineItem, ResourceEstimate
-from .common import external, free, included, line, priced
+from bicep_cost.context import HOURS_PER_MONTH, SECONDS_PER_MONTH, EstimateContext, UnresolvedError, as_number, need_str
+from bicep_cost.engine import Resource
+from bicep_cost.estimators.common import external, free, included, line, priced
+from bicep_cost.model import LineItem, ResourceEstimate
 
 DEDICATED_TIERS: dict[str, str] = {
     "B": "Basic",
@@ -46,7 +46,7 @@ def parse_plan_sku(name: str) -> PlanSku:
         return PlanSku("dedicated", f"Premium v{m.group(3)}", f"P{m.group(1)}{m.group(2)} v{m.group(3)}")
     if m := re.fullmatch(r"i(\d)(m?)v2", low):
         return PlanSku("isolated", "Isolated v2", f"I{m.group(1)}{m.group(2)} v2")
-    raise Unresolved(f"unrecognised App Service plan SKU {name!r}")
+    raise UnresolvedError(f"unrecognised App Service plan SKU {name!r}")
 
 
 def is_linux(plan: Resource) -> bool:
@@ -122,7 +122,7 @@ def estimate_site(res: Resource, ctx: EstimateContext) -> ResourceEstimate:
         return included(res, f"runs on plan {plan.name}")
     try:
         sku = parse_plan_sku(need_str(plan, "sku.name"))
-    except Unresolved:
+    except UnresolvedError:
         return included(res, f"runs on plan {plan.name}")
     if sku.kind == "consumption":
         return _consumption_function(res, ctx)

@@ -16,8 +16,9 @@ bicep-cost = "bicep_cost.cli:main"
 
 [dependency-groups]
 dev = [
-    "ty>=0.0.59",
-    "ruff>=0.14.0",
+    "ty>=0.0.89",
+    "ruff>=0.17.1",
+    "prek>=0.5.5",
 ]
 test = [
     "pytest>=9.1.0",
@@ -31,6 +32,30 @@ pythonpath = ["."]
 
 [tool.ruff]
 line-length = 120
+indent-width = 4
+target-version = "py311"
+extend-exclude = ["*.md", ".worktrees"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+select = [
+    "E", "F", "I", "UP", "B", "ANN", "SIM", "C4", "PERF", "FURB", "ASYNC",
+    "RUF", "N", "PTH", "TID", "RET", "PIE", "A", "T20", "LOG", "DTZ", "FLY", "PLE", "PLW",
+]
+ignore = ["ANN401"]
+
+[tool.ruff.lint.per-file-ignores]
+"bicep_cost/cli.py" = ["T201"]
+"scripts/check_files.py" = ["T201"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.format]
+indent-style = "space"
+quote-style = "double"
+line-ending = "auto"
+
+[tool.ty.rules]
+possibly-missing-attribute = "error"
+possibly-missing-import = "error"
+missing-type-argument = "error"

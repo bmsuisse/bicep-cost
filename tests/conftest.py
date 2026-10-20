@@ -1,6 +1,7 @@
 import json
 import re
 import urllib.parse
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,6 @@ from bicep_cost.prices import PriceClient, RawPriceItem
 from bicep_cost.usage import UsageConfig
 
 REGION = "westeurope"
-_counter = 0
 
 
 def item(
@@ -27,8 +27,6 @@ def item(
     meter_id: str | None = None,
     arm_sku: str = "",
 ) -> RawPriceItem:
-    global _counter
-    _counter += 1
     return {
         "currencyCode": "USD",
         "tierMinimumUnits": tier,
@@ -265,7 +263,7 @@ def make_resource(type_: str, name: str, body: dict[str, JsonValue], sub: str = 
 
 
 @pytest.fixture
-def make_ctx(prices: PriceClient):
+def make_ctx(prices: PriceClient) -> Callable[[list[Resource] | None, dict[str, object] | None], EstimateContext]:
     def build(resources: list[Resource] | None = None, usage: dict[str, object] | None = None) -> EstimateContext:
         return EstimateContext(
             prices=prices,

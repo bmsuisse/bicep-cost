@@ -1,6 +1,8 @@
 import json
 import tomllib
+from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -9,16 +11,18 @@ from bicep_cost.collect import collectors
 from bicep_cost.collect.arm import ArmClient, AzureError, parse_series
 from bicep_cost.collect.collectors import Finding, classify_operation, collect_all
 from bicep_cost.collect.toml_out import render_usage_toml
+from bicep_cost.engine import Resource
 from bicep_cost.prices import PriceClient
+from tests.conftest import fake_fetcher, make_resource
 
-from .conftest import fake_fetcher, make_resource
+Response = dict[str, object] | Callable[[str, dict[str, object] | None], dict[str, object]] | Exception
 
 NOW = datetime(2026, 10, 20, 12, 0, tzinfo=UTC)
 DAYS = 30
 FACTOR = 730 / 24 / DAYS
 
 
-def metric(values_by_dims: list[tuple[dict[str, str], list[float | None]]], agg: str = "total") -> dict:
+def metric(values_by_dims: list[tuple[dict[str, str], list[float | None]]], agg: str = "total") -> dict[str, object]:
     return {
         "value": [
             {
@@ -38,19 +42,21 @@ class FakeAzure:
     """Routes ARM calls by (substring of url) -> response; records every call."""
 
     def __init__(self) -> None:
-        self.routes: list[tuple[str, object]] = []
+        self.routes: list[tuple[str, Response]] = []
         self.calls: list[str] = []
 
-    def on(self, fragment: str, response: object) -> None:
+    def on(self, fragment: str, response: Response) -> None:
         self.routes.append((fragment, response))
 
-    def __call__(self, method: str, url: str, body: dict | None):
+    def __call__(self, method: str, url: str, body: dict[str, object] | None) -> dict[str, object] | None:
         self.calls.append(f"{method} {url}")
         for fragment, response in self.routes:
             if fragment in url:
                 if isinstance(response, Exception):
                     raise response
-                return response(url, body) if callable(response) else response
+                if isinstance(response, dict):
+                    return response
+                return response(url, body)
         return None
 
 
@@ -63,7 +69,7 @@ def arm(az: FakeAzure) -> ArmClient:
     return ArmClient(az, days=DAYS, now=NOW)
 
 
-def test_classify_operation():
+def test_classify_operation() -> None:
     assert classify_operation("GetBlob") == "read"
     assert classify_operation("PutBlock") == "write"
     assert classify_operation("ListBlobs") == "write"
@@ -71,7 +77,7 @@ def test_classify_operation():
     assert classify_operation("DeleteBlob") == "other"
 
 
-def test_parse_series_reads_dimensions_and_missing_points():
+def test_parse_series_reads_dimensions_and_missing_points() -> None:
     (s,) = parse_series(metric([({"ApiName": "GetBlob"}, [1, None, 3])]), "Total")
     assert s.dimensions == {"apiname": "GetBlob"}
     assert s.values == [1, None, 3]
@@ -80,7 +86,7 @@ def test_parse_series_reads_dimensions_and_missing_points():
     assert parse_series(None, "Total") == []
 
 
-def storage(name="sa", sub="sub1"):
+def storage(name: str = "sa", sub: str = "sub1") -> Resource:
     return make_resource(
         "Microsoft.Storage/storageAccounts",
         name,
@@ -89,7 +95,7 @@ def storage(name="sa", sub="sub1"):
     )
 
 
-def test_storage_capacity_and_operations(az):
+def test_storage_capacity_and_operations(az: FakeAzure) -> None:
     az.on("BlobCapacity", metric([({}, [1 * 2**30, 5 * 2**30, None])], "average"))
     az.on(
         "Transactions",
@@ -112,8 +118,10 @@ def test_storage_capacity_and_operations(az):
     assert any("/blobServices/default/providers/microsoft.insights/metrics" in c for c in az.calls)
 
 
-def test_workspace_ingestion_and_top_tables(az):
-    def query(url, body):
+def test_workspace_ingestion_and_top_tables(az: FakeAzure) -> None:
+    def query(url: str, body: dict[str, object] | None) -> dict[str, object]:
+        assert body is not None
+        assert isinstance(body["query"], str)
         if "top 5" in body["query"]:
             return {"Tables": [{"Rows": [["StorageBlobLogs", 90.0], ["AppTraces", 10.0]]}]}
         return {"Tables": [{"Rows": [[100.0]]}]}
@@ -130,11 +138,11 @@ def test_workspace_ingestion_and_top_tables(az):
     assert "StorageBlobLogs 90%" in result.notes[("loganalytics", "ws")][0]
 
 
-def container_app(name="app"):
+def container_app(name: str = "app") -> Resource:
     return make_resource("Microsoft.App/containerApps", name, {"location": "westeurope", "apiVersion": "2024-03-01"})
 
 
-def test_container_app_replica_hours_idle_and_requests(az):
+def test_container_app_replica_hours_idle_and_requests(az: FakeAzure) -> None:
     hours = DAYS * 24
     az.on("metricnames=Replicas", metric([({}, [1.0] * hours)], "average"))
     # 5-minute windows: first half busy, second half idle
@@ -154,7 +162,7 @@ def test_container_app_replica_hours_idle_and_requests(az):
     assert values["requests_millions"] == pytest.approx(2 * FACTOR)
 
 
-def test_container_app_without_replica_data_is_zero_if_it_exists_else_not_found(az):
+def test_container_app_without_replica_data_is_zero_if_it_exists_else_not_found(az: FakeAzure) -> None:
     res = container_app()
     coll = collectors.Collection(arm(az), collectors.ResourceIndex([res]), {})
     assert collectors.collect_container_app(res, coll).notes == ["not found in Azure"]
@@ -163,7 +171,7 @@ def test_container_app_without_replica_data_is_zero_if_it_exists_else_not_found(
     assert [(f.key, f.value) for f in out.findings] == [("replica_hours", 0.0)]
 
 
-def test_file_share_falls_back_to_account_total_split_over_shares(az):
+def test_file_share_falls_back_to_account_total_split_over_shares(az: FakeAzure) -> None:
     acct = storage("acct")
     shares = [
         make_resource("Microsoft.Storage/storageAccounts/fileServices/shares", f"acct/default/{n}", {})
@@ -181,7 +189,7 @@ def test_file_share_falls_back_to_account_total_split_over_shares(az):
     assert "split evenly across its 2 shares" in out.notes[0]
 
 
-def test_costs_drive_session_pools_and_cognitive_accounts(az):
+def test_costs_drive_session_pools_and_cognitive_accounts(az: FakeAzure) -> None:
     pool = make_resource("Microsoft.App/sessionPools", "pool", {"location": "westeurope"})
     ai = make_resource("Microsoft.CognitiveServices/accounts", "ai", {"location": "westeurope"})
     az.on(
@@ -200,13 +208,13 @@ def test_costs_drive_session_pools_and_cognitive_accounts(az):
     assert result.cost_currency == "EUR"
 
 
-def test_one_failing_resource_becomes_a_warning_not_a_crash(az):
+def test_one_failing_resource_becomes_a_warning_not_a_crash(az: FakeAzure) -> None:
     az.on("resourceGroups/rg/providers/Microsoft.Storage/storageAccounts/bad", AzureError("HTTP 403"))
     result = collect_all([storage("bad"), storage("ok")], arm(az))
     assert any("bad" in w and "403" in w for w in result.warnings)
 
 
-def test_postgres_and_plan_report_live_values_and_drift(az):
+def test_postgres_and_plan_report_live_values_and_drift(az: FakeAzure) -> None:
     pg = make_resource(
         "Microsoft.DBforPostgreSQL/flexibleServers",
         "pg",
@@ -229,7 +237,7 @@ def test_postgres_and_plan_report_live_values_and_drift(az):
     assert "DRIFT instances: template 2, live 3" in result.notes[("appserviceplans", "plan")][0]
 
 
-def test_toml_roundtrip_with_awkward_names():
+def test_toml_roundtrip_with_awkward_names() -> None:
     findings = [
         Finding("fileshares", 'acct/default/we"ird', "used_gb", 1.5, "src"),
         Finding("storage", "sa", "stored_gb", 12345.678, "src"),
@@ -276,7 +284,7 @@ TEMPLATE = {
 
 
 @pytest.fixture
-def project(tmp_path, monkeypatch):
+def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, FakeAzure]:
     (tmp_path / "main.json").write_text(json.dumps(TEMPLATE))
     azure = FakeAzure()
     azure.on("BlobCapacity", metric([({}, [100 * 2**30])], "average"))
@@ -290,7 +298,9 @@ def project(tmp_path, monkeypatch):
     return tmp_path, azure
 
 
-def test_collect_writes_usage_file_next_to_template_and_estimate_picks_it_up(project, capsys):
+def test_collect_writes_usage_file_next_to_template_and_estimate_picks_it_up(
+    project: tuple[Path, FakeAzure], capsys: pytest.CaptureFixture[str]
+) -> None:
     path, azure = project
     assert cli.main(["collect", str(path / "main.json"), "--resource-group", "my-rg"]) == 0
     usage_file = path / "main.usage.toml"
@@ -309,7 +319,9 @@ def test_collect_writes_usage_file_next_to_template_and_estimate_picks_it_up(pro
     assert any("365 active h" in i["description"] for i in app["items"])
 
 
-def test_estimate_discovers_usage_files_and_reports_them(project, capsys):
+def test_estimate_discovers_usage_files_and_reports_them(
+    project: tuple[Path, FakeAzure], capsys: pytest.CaptureFixture[str]
+) -> None:
     path, _ = project
     (path / "main.usage.toml").write_text("[storage.sa]\nstored_gb = 7\n")
     assert cli.main(["estimate", str(path / "main.json"), "--detail"]) == 0
@@ -319,7 +331,9 @@ def test_estimate_discovers_usage_files_and_reports_them(project, capsys):
     assert "built-in defaults" in out.out  # other figures still come from defaults
 
 
-def test_currency_follows_usage_file_and_discounts_apply(project, capsys):
+def test_currency_follows_usage_file_and_discounts_apply(
+    project: tuple[Path, FakeAzure], capsys: pytest.CaptureFixture[str]
+) -> None:
     path, _ = project
     (path / "main.usage.toml").write_text(
         '[meta]\ncost_currency = "EUR"\n[discounts]\n"microsoft.app/containerapps" = 50\n'
@@ -334,7 +348,9 @@ def test_currency_follows_usage_file_and_discounts_apply(project, capsys):
     assert any("50% discount" in n for n in app["notes"])
 
 
-def test_init_usage_lists_every_tunable_with_default(project, capsys):
+def test_init_usage_lists_every_tunable_with_default(
+    project: tuple[Path, FakeAzure], capsys: pytest.CaptureFixture[str]
+) -> None:
     path, _ = project
     assert cli.main(["init-usage", str(path / "main.json")]) == 0
     data = tomllib.loads(capsys.readouterr().out)
@@ -342,7 +358,7 @@ def test_init_usage_lists_every_tunable_with_default(project, capsys):
     assert data["containerapps"]["app"]["idle_percent"] == 0
 
 
-def test_collect_requires_resource_group(project):
+def test_collect_requires_resource_group(project: tuple[Path, FakeAzure]) -> None:
     path, _ = project
     with pytest.raises(SystemExit):
         cli.main(["collect", str(path / "main.json")])
