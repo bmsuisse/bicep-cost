@@ -311,3 +311,14 @@ def test_baseline_rejects_invalid_totals(total, tmp_path, capsys):
     assert code == 1
     assert not out
     assert "finite nonnegative" in err
+
+
+def test_chart_survives_budget_failure(capsys, fixtures_dir):
+    for format_ in ("text", "markdown"):
+        code, out, _ = run_cli(
+            capsys, "estimate", str(fixtures_dir / "app.json"), "--format", format_, "--fail-above", "1"
+        )
+        assert code == 3
+        assert "Monthly cost breakdown (USD/month" in out
+        assert "################################" in out
+        assert "unsupported" in out or "no estimator" in out

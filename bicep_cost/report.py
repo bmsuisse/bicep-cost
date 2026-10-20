@@ -146,6 +146,24 @@ def _group_rows(est: Estimate, group_by: str) -> list[tuple[str, int, float, flo
     return sorted(((k, int(v[0]), v[1], v[2]) for k, v in totals.items()), key=lambda t: -(t[2] + t[3]))
 
 
+def render_chart(est: Estimate, group_by: str = "resource") -> str:
+    """Plain-text bars of known monthly costs, largest first, suitable for CI logs."""
+    if group_by in ("type", "module"):
+        rows = [(key, fixed + usage) for key, _, fixed, usage in _group_rows(est, group_by)]
+    else:
+        rows = [(r.resource.address, r.monthly) for r in _billed(est)]
+    rows = [(name, cost) for name, cost in rows if cost > 0]
+    if not rows:
+        return "Monthly cost breakdown: no positive priced costs."
+    peak = rows[0][1]
+    lines = [f"Monthly cost breakdown ({est.currency}/month; share of known total)", ""]
+    for name, cost in rows:
+        bar = "#" * max(1, round(cost / peak * 32))
+        lines.append(f"{name}")
+        lines.append(f"  {bar:<32}  {money(cost, est.currency)}  ({cost / est.monthly * 100:.1f}%)")
+    return "\n".join(lines)
+
+
 def render_text(
     est: Estimate, source: str, diagnostics: list[Diagnostic], detail: bool = False, group_by: str = "resource"
 ) -> str:
@@ -155,6 +173,7 @@ def render_text(
         f"Prices: Azure Retail Prices API ({cur}, list price, pay-as-you-go), default region {est.region_default}",
         "",
     ]
+    out.extend([render_chart(est, group_by), ""])
     billed = _billed(est)
     if group_by in ("type", "module"):
         rows = _group_rows(est, group_by)
@@ -227,6 +246,10 @@ def render_markdown(est: Estimate, source: str, diagnostics: list[Diagnostic]) -
     cur = est.currency
     lines = [
         f"### Azure cost estimate — `{source}`",
+        "",
+        "```text",
+        render_chart(est).replace("`", "'"),
+        "```",
         "",
         f"| | {cur}/month |",
         "|---|---:|",

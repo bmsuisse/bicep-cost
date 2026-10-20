@@ -180,3 +180,34 @@ from a zero baseline fails the relative cap. Thresholds must be finite and
 nonnegative. The full report is written before a budget failure, including with
 `--output`, so CI can always retain it. `--strict` failures still take precedence
 (exit 2). Baseline reports must use the same currency; no conversion is applied.
+
+## Cost breakdown charts
+
+Text and Markdown estimates include horizontal bars ordered from the most
+expensive resource to the least. Each bar shows the monthly amount and share of
+the known total. Text `--group-by type` or `--group-by module` aggregates both the
+chart and table. Zero-cost resources do not get bars; unresolved and unsupported
+resources remain listed below, since their costs are not included in the total.
+Charts are plain text for readable CI logs and Markdown PR comments, and are
+written even when a budget cap fails. JSON and CSV remain machine-readable.
+
+## Automatic releases
+
+Like [bmsui](https://github.com/bmsuisse/bmsui/blob/main/.github/workflows/release.yml),
+main pushes run reusable CI, detect a new package version, publish to PyPI using
+OIDC, and create a GitHub release with wheel/sdist assets. PR CI checks Ruff, ty,
+tests, builds and an installed-wheel smoke test on Python 3.11 and 3.14.
+
+Before the first merge, a PyPI maintainer must register a
+[pending trusted publisher](https://docs.pypi.org/trusted-publishers/creating-a-project-through-oidc/):
+project **bicep-cost**, owner **bmsuisse**, repository **bicep-cost**, workflow
+**release.yml**, environment **pypi**. Use the same environment in GitHub;
+restrict its deployment branches to `main`. No long-lived PyPI token is needed.
+
+Bump `[project] version` in `pyproject.toml`, run `uv lock`, and merge the PR.
+Main publishes that version after CI passes; an existing GitHub release is
+skipped. The Release workflow can also be dispatched manually from main; its
+**dry_run** input defaults to true, validating without publishing. Release jobs
+are serialized. If publication succeeded but release creation failed, rerun the
+workflow: existing PyPI files are skipped and GitHub release creation is retried.
+Do not change files for a version already uploaded to PyPI; bump the version.
