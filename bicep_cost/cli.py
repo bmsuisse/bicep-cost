@@ -3,7 +3,9 @@
 import argparse
 import json
 import logging
+import math
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 from .calc import estimate_resources
@@ -22,6 +24,28 @@ def _positive_int(text: str) -> int:
     if value <= 0:
         raise argparse.ArgumentTypeError("must be a positive number of days")
     return value
+
+
+def _nonnegative_number(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value) or value < 0:
+        raise argparse.ArgumentTypeError("must be a finite nonnegative number")
+    return value
+
+
+def _add_budget_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--fail-above",
+        type=_nonnegative_number,
+        metavar="AMOUNT",
+        help="exit with 3 if the monthly total exceeds AMOUNT",
+    )
+    parser.add_argument(
+        "--fail-increase-percent",
+        type=_nonnegative_number,
+        metavar="PERCENT",
+        help="exit with 3 if the monthly total increases by more than PERCENT over the baseline",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -86,14 +110,14 @@ def build_parser() -> argparse.ArgumentParser:
     est.add_argument(
         "--strict", action="store_true", help="exit with 2 if any resource could not be priced or has no estimator"
     )
-    est.add_argument(
-        "--fail-above", type=float, metavar="AMOUNT", help="exit with 3 if the monthly total exceeds AMOUNT"
-    )
+    _add_budget_args(est)
+    est.add_argument("--baseline", type=Path, help="saved estimate JSON for --fail-increase-percent")
     _add_cache_args(est)
 
     diff = sub.add_parser("diff", help="compare two `estimate --format json` reports")
     diff.add_argument("base", type=Path)
     diff.add_argument("head", type=Path)
+    _add_budget_args(diff)
 
     collect = sub.add_parser(
         "collect",
@@ -172,6 +196,9 @@ def discover_usage_files(template: Path, parameters: Path | None) -> list[Path]:
 
 
 def _cmd_estimate(args: argparse.Namespace) -> int:
+    if args.fail_increase_percent is not None and args.baseline is None:
+        raise ValueError("--fail-increase-percent requires --baseline REPORT.json")
+    baseline = _load_report(args.baseline) if args.baseline else None
     compiled = load_input(args.template, args.parameters, args.overrides)
     engine = Engine(
         DeploymentSettings(
@@ -191,6 +218,8 @@ def _cmd_estimate(args: argparse.Namespace) -> int:
             f"usage file costs are in {usage.cost_currency}, but --currency is {currency}; "
             "currency conversion is not supported"
         )
+    if baseline and baseline["currency"] != currency:
+        raise ValueError("cannot compare reports in different currencies")
     estimate = estimate_resources(
         engine.resources,
         _client(args, currency),
@@ -213,26 +242,44 @@ def _cmd_estimate(args: argparse.Namespace) -> int:
     if args.strict and (estimate.count("unresolved") or estimate.count("unsupported")):
         print("bicep-cost: some resources were not priced (--strict)", file=sys.stderr)
         return 2
-    if args.fail_above is not None and estimate.monthly > args.fail_above:
-        print(
-            f"bicep-cost: {estimate.monthly:,.2f} {estimate.currency}/month "
-            f"exceeds --fail-above {args.fail_above:,.2f}",
-            file=sys.stderr,
-        )
-        return 3
-    return 0
+    return _budget_status(estimate.monthly, estimate.currency, args, baseline)
+
+
+def _budget_status(total: float, currency: str, args: argparse.Namespace, baseline: EstimateJson | None) -> int:
+    amount = Decimal(str(round(total, 6)))
+    failures: list[str] = []
+    if args.fail_above is not None and amount > Decimal(str(args.fail_above)):
+        failures.append(f"{total:,.2f} {currency}/month exceeds --fail-above {args.fail_above:,.2f}")
+    if args.fail_increase_percent is not None and baseline is not None:
+        old = Decimal(str(baseline["total_monthly"]))
+        limit = old * (1 + Decimal(str(args.fail_increase_percent)) / 100)
+        if amount > limit:
+            increase = f"{(amount - old) / old * 100:,.2f}%" if old else "from zero"
+            failures.append(
+                f"monthly cost increase {increase} exceeds --fail-increase-percent {args.fail_increase_percent:g}"
+            )
+    for failure in failures:
+        print(f"bicep-cost: {failure}", file=sys.stderr)
+    return 3 if failures else 0
 
 
 def _load_report(path: Path) -> EstimateJson:
     data = json.loads(path.read_text())
-    if "resources" not in data or "total_monthly" not in data:
+    if not isinstance(data, dict) or not {"resources", "total_monthly", "currency", "source"} <= data.keys():
         raise CompileError(f"{path} is not a `bicep-cost estimate --format json` report")
+    total = data["total_monthly"]
+    if isinstance(total, bool) or not isinstance(total, (int, float)) or not math.isfinite(total) or total < 0:
+        raise CompileError(f"{path}: total_monthly must be a finite nonnegative number")
+    if not isinstance(data["currency"], str):
+        raise CompileError(f"{path}: currency must be a currency code")
+    data["currency"] = normalize_currency(data["currency"])
     return data
 
 
 def _cmd_diff(args: argparse.Namespace) -> int:
-    sys.stdout.write(render_diff(_load_report(args.base), _load_report(args.head)))
-    return 0
+    base, head = _load_report(args.base), _load_report(args.head)
+    sys.stdout.write(render_diff(base, head))
+    return _budget_status(head["total_monthly"], head["currency"], args, base)
 
 
 def _expand(args: argparse.Namespace, subscription_id: str, resource_group: str) -> tuple[Engine, str]:

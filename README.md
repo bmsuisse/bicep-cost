@@ -161,3 +161,22 @@ Diffs require both reports to use the same currency.
 
 Azure's non-USD retail rates are budget estimates, not negotiated billing rates.
 See [Microsoft's Retail Prices API currency documentation](https://learn.microsoft.com/rest/api/cost-management/retail-prices/azure-retail-prices).
+
+## Percentage cost caps in CI
+
+Save a baseline estimate (using the same currency and usage assumptions), then
+fail if the new monthly cost grows by more than 10 percent:
+
+```sh
+bicep-cost estimate main.bicep --format json -o base.json
+# After changing the template:
+bicep-cost estimate main.bicep --baseline base.json --fail-increase-percent 10 --fail-above 1500
+# Or compare two saved JSON reports:
+bicep-cost diff base.json head.json --fail-increase-percent 10 --fail-above 1500
+```
+
+Either exceeded cap returns **3**. Equality and decreases pass; any positive cost
+from a zero baseline fails the relative cap. Thresholds must be finite and
+nonnegative. The full report is written before a budget failure, including with
+`--output`, so CI can always retain it. `--strict` failures still take precedence
+(exit 2). Baseline reports must use the same currency; no conversion is applied.
