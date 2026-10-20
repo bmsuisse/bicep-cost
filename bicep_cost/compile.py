@@ -8,7 +8,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .armexpr import JsonValue, Unknown
+from bicep_cost.armexpr import JsonValue, Unknown
 
 
 class CompileError(Exception):

@@ -3,17 +3,20 @@
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
-from .armexpr import Unknown
-from .engine import Resource
-from .prices import Meter, NoPriceFound, PriceClient, normalize_region
-from .usage import UsageConfig
+from bicep_cost.armexpr import Unknown
+from bicep_cost.engine import Resource
+from bicep_cost.prices import Meter, NoPriceFoundError, PriceClient, normalize_region
+from bicep_cost.usage import UsageConfig
 
 HOURS_PER_MONTH = 730.0
 SECONDS_PER_MONTH = HOURS_PER_MONTH * 3600
 
 
-class Unresolved(Exception):
+class UnresolvedError(Exception):
     """A value the estimate depends on is not known (e.g. an unset parameter)."""
+
+
+Unresolved = UnresolvedError
 
 
 @dataclass
@@ -76,7 +79,7 @@ class EstimateContext:
         )
         if found is None:
             wanted = {k: v for k, v in (("product", product), ("sku", sku), ("meter", meter)) if v}
-            raise NoPriceFound(f"no price for {service} in {region} {wanted}")
+            raise NoPriceFoundError(f"no price for {service} in {region} {wanted}")
         return found
 
     def meters(
@@ -88,25 +91,25 @@ class EstimateContext:
         sku: str | None = None,
         arm_sku: str | None = None,
     ) -> tuple[Meter, ...]:
-        from .prices import build_filter
+        from bicep_cost.prices import build_filter
 
         return self.prices.query(build_filter(service, region, product=product, sku=sku, arm_sku=arm_sku))
 
     def meters_containing(self, service: str, region: str, *, product_contains: str) -> tuple[Meter, ...]:
-        from .prices import build_filter
+        from bicep_cost.prices import build_filter
 
         return self.prices.query(build_filter(service, region, product_contains=product_contains))
 
 
 def need_str(res: Resource, path: str, what: str | None = None) -> str:
-    """A string value from the resource, raising :class:`Unresolved` if it is unknown or missing."""
+    """A string value from the resource, raising :class:`UnresolvedError` if it is unknown or missing."""
     value = res.get(path)
     if isinstance(value, str):
         return value
     label = what or path
     if value is None and not res.is_unknown_at(path):
-        raise Unresolved(f"{label} is not set on {res.name}")
-    raise Unresolved(f"{label} of {res.name} is not known (depends on an unset parameter or a runtime value)")
+        raise UnresolvedError(f"{label} is not set on {res.name}")
+    raise UnresolvedError(f"{label} of {res.name} is not known (depends on an unset parameter or a runtime value)")
 
 
 def as_number(value: object, default: float) -> float:

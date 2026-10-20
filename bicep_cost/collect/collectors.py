@@ -5,10 +5,10 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
-from ..context import HOURS_PER_MONTH, ResourceIndex
-from ..engine import Resource
-from ..estimators.appservice import parse_plan_sku
-from .arm import ArmClient, AzureError, Series
+from bicep_cost.collect.arm import ArmClient, AzureError, Series
+from bicep_cost.context import HOURS_PER_MONTH, ResourceIndex
+from bicep_cost.engine import Resource
+from bicep_cost.estimators.appservice import parse_plan_sku
 
 log = logging.getLogger(__name__)
 

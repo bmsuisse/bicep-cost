@@ -139,7 +139,8 @@ Other options: `--location` (default region and `resourceGroup().location`, defa
 ```bash
 uv sync --group test --group dev
 uv run -m pytest
-uv run ruff check . && uv run ty check
+uv run ruff check . && uv run ruff format --check .
+uv run ty check --error-on-warning
 ```
 
 ## Currency
@@ -262,3 +263,28 @@ sheets can be used without login; completely offline estimates also need the
 Retail API metadata in the normal price cache. Use `--price-sheet FILE --offline`
 for that; `--azure-prices` always downloads fresh rates. Snapshots are not refreshed
 automatically, so download a new sheet when your agreement or billing period changes.
+
+## Quality gates
+
+Ruff uses the strict BMS Python rule families from `init-app-stack` (annotations,
+modern syntax, imports, bugbear, performance, pathlib, naming and logging).
+The target stays **Python 3.11**, matching package support. FastAPI-only rules do
+not apply to this CLI; CLI printing is allowed specifically in `cli.py` and the
+file-size guard. Relative imports are banned. `ANN401` (explicit `Any`) is a
+nonblocking warning, matching the BMS scaffold. Production and pytest function
+signatures are annotated; no test-wide annotation exception is used.
+
+Ty checks fail on warnings, with possibly missing attributes/imports and missing
+generic type arguments treated as errors. Default type diagnostics remain active;
+optional experimental rules are not enabled indiscriminately. CI runs the same
+checks and formatting verification on Python 3.11 and 3.14.
+
+```sh
+uv sync --locked --all-groups
+uv run prek install             # enable the pre-commit hook
+uv run prek run --all-files      # format, lint, typecheck, YAML and file-size checks
+```
+
+The hooks use the repository's locked tool versions. Re-run after automatic fixes
+and stage the resulting changes before committing. Pytest remains a CI check;
+run focused tests locally for behavior you change.

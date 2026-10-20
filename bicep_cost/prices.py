@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:
-    from .pricesheet import PriceSheet
+    from bicep_cost.pricesheet import PriceSheet
 
 log = logging.getLogger(__name__)
 
@@ -33,8 +33,11 @@ class PriceError(Exception):
     """The price API could not be reached or returned something unusable."""
 
 
-class NoPriceFound(PriceError):
+class NoPriceFoundError(PriceError):
     """The API answered, but has no meter matching the query."""
+
+
+NoPriceFound = NoPriceFoundError
 
 
 class RawPriceItem(TypedDict, total=False):
@@ -280,7 +283,7 @@ class PriceClient:
                 )
             )
             if found:
-                return sorted(found, key=lambda m: (m.product, m.sku, m.name, m.meter_id))[0]
+                return min(found, key=lambda m: (m.product, m.sku, m.name, m.meter_id))
         return None
 
 
@@ -333,7 +336,7 @@ def _parse_date(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return datetime.fromisoformat(value)
     except ValueError:
         return None
 

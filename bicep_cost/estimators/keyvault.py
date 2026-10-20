@@ -1,9 +1,9 @@
 """Key Vault (operations) and Cognitive Services / AI Foundry accounts (usage only)."""
 
-from ..context import EstimateContext, need_str
-from ..engine import Resource
-from ..model import ResourceEstimate
-from .common import line, priced, usage_amount
+from bicep_cost.context import EstimateContext, need_str
+from bicep_cost.engine import Resource
+from bicep_cost.estimators.common import line, priced, usage_amount
+from bicep_cost.model import ResourceEstimate
 
 
 def estimate_vault(res: Resource, ctx: EstimateContext) -> ResourceEstimate:

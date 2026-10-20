@@ -9,7 +9,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
-from .armexpr import (
+from bicep_cost.armexpr import (
     JsonValue,
     Unknown,
     evaluate_string,
@@ -410,7 +410,7 @@ class TemplateScope:
 
     @staticmethod
     def _resource_id(type_: str, name: str, sub: str, rg: str) -> str:
-        from .armexpr import build_resource_id
+        from bicep_cost.armexpr import build_resource_id
 
         return build_resource_id(f"/subscriptions/{sub}/resourceGroups/{rg}", type_, name.split("/"))
 

@@ -1,10 +1,10 @@
 """Service Bus namespaces (Basic / Standard / Premium)."""
 
-from ..context import HOURS_PER_MONTH, EstimateContext, Unresolved, as_number, need_str
-from ..engine import Resource
-from ..model import LineItem, ResourceEstimate
-from ..prices import NoPriceFound
-from .common import line, priced
+from bicep_cost.context import HOURS_PER_MONTH, EstimateContext, UnresolvedError, as_number, need_str
+from bicep_cost.engine import Resource
+from bicep_cost.estimators.common import line, priced
+from bicep_cost.model import LineItem, ResourceEstimate
+from bicep_cost.prices import NoPriceFoundError
 
 PREMIUM_UNITS = (1, 2, 4, 8, 16)
 
@@ -18,7 +18,7 @@ def estimate_namespace(res: Resource, ctx: EstimateContext) -> ResourceEstimate:
     if tier == "Premium":
         units = int(as_number(res.get("sku.capacity"), 1))
         if units not in PREMIUM_UNITS:
-            raise Unresolved(f"Premium messaging units must be one of {PREMIUM_UNITS}, got {units}")
+            raise UnresolvedError(f"Premium messaging units must be one of {PREMIUM_UNITS}, got {units}")
         unit = ctx.meter("Service Bus", region, sku="Premium", meter="Premium Messaging Unit")
         items.append(line(f"Premium x{units} messaging unit(s)", unit, units * HOURS_PER_MONTH))
         notes.append("operations are included; geo-replication data transfer is not priced")
@@ -29,7 +29,7 @@ def estimate_namespace(res: Resource, ctx: EstimateContext) -> ResourceEstimate:
         items.append(line(f"Basic operations ({ops_m:g} M)", meter, ops_m, "usage", scope=scope, note="assumed volume"))
         return priced(res, items, notes)
     if tier != "Standard":
-        raise Unresolved(f"Service Bus SKU {tier!r} is not priced")
+        raise UnresolvedError(f"Service Bus SKU {tier!r} is not priced")
     hourly = next(
         (
             m
@@ -39,7 +39,7 @@ def estimate_namespace(res: Resource, ctx: EstimateContext) -> ResourceEstimate:
         None,
     )
     if hourly is None:
-        raise NoPriceFound(f"no hourly Standard base price for Service Bus in {region}")
+        raise NoPriceFoundError(f"no hourly Standard base price for Service Bus in {region}")
     items.append(line("Standard base charge", hourly, HOURS_PER_MONTH))
     ops = ctx.meter("Service Bus", region, sku="Standard", meter="Standard Messaging Operations")
     items.append(

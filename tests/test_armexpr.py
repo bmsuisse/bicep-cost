@@ -4,7 +4,9 @@ from bicep_cost.armexpr import JsonValue, Unknown, evaluate_string, is_expressio
 from bicep_cost.engine import DeploymentSettings, Engine, TemplateScope
 
 
-def scope(parameters: dict | None = None, variables: dict | None = None) -> TemplateScope:
+def scope(
+    parameters: dict[str, JsonValue] | None = None, variables: dict[str, JsonValue] | None = None
+) -> TemplateScope:
     engine = Engine(DeploymentSettings())
     template: dict[str, JsonValue] = {
         "parameters": {k: {"type": "string"} for k in (parameters or {})},
@@ -14,7 +16,7 @@ def scope(parameters: dict | None = None, variables: dict | None = None) -> Temp
     return TemplateScope(engine, template, parameters, (), "sub", "rg", "dep", None)
 
 
-def ev(expr: str, **params):
+def ev(expr: str, **params: JsonValue) -> JsonValue:
     return evaluate_string(expr, scope(params))
 
 
@@ -46,55 +48,57 @@ def ev(expr: str, **params):
         ("[contains(createObject('Key', 1), 'key')]", True),
     ],
 )
-def test_functions(expr, expected):
+def test_functions(expr: str, expected: JsonValue) -> None:
     assert ev(expr) == expected
 
 
-def test_resource_id_forms():
+def test_resource_id_forms() -> None:
     assert ev("[resourceId('Microsoft.Web/sites', 'app')]") == (
         "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Web/sites/app"
     )
     assert ev("[resourceId('other-rg', 'Microsoft.Web/sites/slots', 'app', 'test')]") == (
         "/subscriptions/sub/resourceGroups/other-rg/providers/Microsoft.Web/sites/app/slots/test"
     )
-    assert ev("[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'x')]").startswith(
-        "/subscriptions/sub/providers/"
-    )
+    role = ev("[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'x')]")
+    assert isinstance(role, str)
+    assert role.startswith("/subscriptions/sub/providers/")
     assert ev("[extensionResourceId('/subscriptions/s/x', 'Microsoft.Authorization/roleAssignments', 'g')]") == (
         "/subscriptions/s/x/providers/Microsoft.Authorization/roleAssignments/g"
     )
 
 
-def test_unknown_propagates_but_stays_opaque_in_containers():
+def test_unknown_propagates_but_stays_opaque_in_containers() -> None:
     assert isinstance(ev("[parameters('missing')]"), Unknown)
     assert isinstance(ev("[concat('a', parameters('missing'))]"), Unknown)
     assert isinstance(ev("[if(parameters('missing'), 1, 2)]"), Unknown)
     obj = ev("[createObject('known', 1, 'unk', parameters('missing'))]")
+    assert isinstance(obj, dict)
     assert obj["known"] == 1
     assert isinstance(obj["unk"], Unknown)
     assert isinstance(ev("[listKeys('x', '2020-01-01')]"), Unknown)
     assert isinstance(ev("[reference('x').a]"), Unknown)
 
 
-def test_lazy_branches_and_short_circuit():
+def test_lazy_branches_and_short_circuit() -> None:
     assert ev("[if(true(), 'ok', parameters('missing'))]") == "ok"
     assert ev("[and(false(), parameters('missing'))]") is False
     assert ev("[or(true(), parameters('missing'))]") is True
 
 
-def test_is_expression():
+def test_is_expression() -> None:
     assert is_expression("[parameters('a')]")
     assert not is_expression("[[x]")
     assert not is_expression("abc")
 
 
-def test_unique_string_is_stable_and_shaped():
+def test_unique_string_is_stable_and_shaped() -> None:
     a = ev("[uniqueString('x', 'y')]")
     assert a == ev("[uniqueString('x', 'y')]")
+    assert isinstance(a, str)
     assert len(a) == 13
 
 
-def test_uri_resolves_relative_references_and_uri_component_encodes_utf8():
+def test_uri_resolves_relative_references_and_uri_component_encodes_utf8() -> None:
     assert ev("[uri('https://host/templates/main.json', 'child.json')]") == "https://host/templates/child.json"
     assert ev("[uri('https://host/templates/', 'child.json')]") == "https://host/templates/child.json"
     assert ev("[uriComponent('café a/b')]") == "caf%C3%A9%20a%2Fb"

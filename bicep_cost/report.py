@@ -6,8 +6,8 @@ import json
 from collections import defaultdict
 from typing import TypedDict
 
-from .engine import Diagnostic
-from .model import Estimate, LineItem, ResourceEstimate
+from bicep_cost.engine import Diagnostic
+from bicep_cost.model import Estimate, LineItem, ResourceEstimate
 
 
 class ItemJson(TypedDict):
@@ -61,21 +61,20 @@ def _item_json(i: LineItem) -> ItemJson:
 
 
 def to_json(est: Estimate, source: str, diagnostics: list[Diagnostic]) -> EstimateJson:
-    resources: list[ResourceJson] = []
-    for r in est.resources:
-        resources.append(
-            {
-                "address": r.resource.address,
-                "type": r.resource.type,
-                "name": r.resource.name,
-                "status": r.status,
-                "monthly": round(r.monthly, 6),
-                "fixed": round(r.subtotal("fixed"), 6),
-                "usage": round(r.subtotal("usage"), 6),
-                "items": [_item_json(i) for i in r.items],
-                "notes": r.notes,
-            }
-        )
+    resources: list[ResourceJson] = [
+        {
+            "address": r.resource.address,
+            "type": r.resource.type,
+            "name": r.resource.name,
+            "status": r.status,
+            "monthly": round(r.monthly, 6),
+            "fixed": round(r.subtotal("fixed"), 6),
+            "usage": round(r.subtotal("usage"), 6),
+            "items": [_item_json(i) for i in r.items],
+            "notes": r.notes,
+        }
+        for r in est.resources
+    ]
     return {
         "source": source,
         "price_source": est.price_source,
@@ -197,8 +196,7 @@ def render_text(
                 for i in r.items:
                     flag = "*" if i.basis == "usage" else " "
                     out.append(f"    {flag} {i.description:<64} {i.monthly:>12,.2f}")
-                for n in r.notes:
-                    out.append(f"      - {n}")
+                out.extend(f"      - {n}" for n in r.notes)
     out.append("")
     out.append(f"Provisioned (fixed):        {money(est.fixed, cur):>18}")
     out.append(f"Usage-based* (assumed):     {money(est.usage, cur):>18}")
@@ -265,11 +263,11 @@ def render_markdown(est: Estimate, source: str, diagnostics: list[Diagnostic]) -
         "| Resource | Fixed | Usage | Total |",
         "|---|---:|---:|---:|",
     ]
-    for r in _billed(est):
-        lines.append(
-            f"| `{_short_type(r.resource.type)}` {r.resource.name} | {r.subtotal('fixed'):,.2f} "
-            f"| {r.subtotal('usage'):,.2f} | {r.monthly:,.2f} |"
-        )
+    lines.extend(
+        f"| `{_short_type(r.resource.type)}` {r.resource.name} | {r.subtotal('fixed'):,.2f} "
+        f"| {r.subtotal('usage'):,.2f} | {r.monthly:,.2f} |"
+        for r in _billed(est)
+    )
     unresolved, unsupported = _problems(est)
     external_res = [r for r in est.resources if r.status == "external"]
     if external_res:

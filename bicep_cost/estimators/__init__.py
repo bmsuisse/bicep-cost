@@ -2,11 +2,11 @@
 
 from collections.abc import Callable
 
-from ..context import EstimateContext
-from ..engine import Resource
-from ..model import ResourceEstimate
-from . import aca, appservice, keyvault, monitor, network, postgres, servicebus, sql, storage, vm
-from .common import free
+from bicep_cost.context import EstimateContext
+from bicep_cost.engine import Resource
+from bicep_cost.estimators import aca, appservice, keyvault, monitor, network, postgres, servicebus, sql, storage, vm
+from bicep_cost.estimators.common import free
+from bicep_cost.model import ResourceEstimate
 
 Estimator = Callable[[Resource, EstimateContext], ResourceEstimate]
 

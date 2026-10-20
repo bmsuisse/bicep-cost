@@ -1,9 +1,9 @@
 """Helpers shared by the estimators."""
 
-from ..context import EstimateContext
-from ..engine import Resource
-from ..model import CostBasis, LineItem, ResourceEstimate
-from ..prices import Meter, NoPriceFound
+from bicep_cost.context import EstimateContext
+from bicep_cost.engine import Resource
+from bicep_cost.model import CostBasis, LineItem, ResourceEstimate
+from bicep_cost.prices import Meter, NoPriceFoundError
 
 
 def priced(res: Resource, items: list[LineItem], notes: list[str] | None = None) -> ResourceEstimate:
@@ -64,5 +64,5 @@ def node_price(meters: tuple[Meter, ...], vcores: int, *, zone_redundant: bool =
     if per is None:
         if whole is not None:
             return whole, 1.0
-        raise NoPriceFound(f"no compute price for {vcores} vCores{suffix}")
+        raise NoPriceFoundError(f"no compute price for {vcores} vCores{suffix}")
     return per, float(vcores)

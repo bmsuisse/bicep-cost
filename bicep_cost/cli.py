@@ -8,16 +8,16 @@ import sys
 from decimal import Decimal
 from pathlib import Path
 
-from .calc import estimate_resources
-from .collect.arm import ArmClient, AzureError, az_current_subscription, http_transport
-from .collect.collectors import Finding, collect_all
-from .collect.toml_out import render_usage_toml
-from .compile import CompileError, load_input
-from .engine import DeploymentSettings, Engine
-from .prices import PriceClient, PriceError, build_filter, default_cache_dir, normalize_currency
-from .pricesheet import PriceSheet
-from .report import EstimateJson, render_csv, render_diff, render_json, render_markdown, render_text
-from .usage import UsageConfig
+from bicep_cost.calc import estimate_resources
+from bicep_cost.collect.arm import ArmClient, AzureError, az_current_subscription, http_transport
+from bicep_cost.collect.collectors import Finding, collect_all
+from bicep_cost.collect.toml_out import render_usage_toml
+from bicep_cost.compile import CompileError, load_input
+from bicep_cost.engine import DeploymentSettings, Engine
+from bicep_cost.prices import PriceClient, PriceError, build_filter, default_cache_dir, normalize_currency
+from bicep_cost.pricesheet import PriceSheet
+from bicep_cost.report import EstimateJson, render_csv, render_diff, render_json, render_markdown, render_text
+from bicep_cost.usage import UsageConfig
 
 
 def _positive_int(text: str) -> int:

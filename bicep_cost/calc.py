@@ -4,12 +4,12 @@ import logging
 from collections import defaultdict
 from dataclasses import dataclass
 
-from .context import EstimateContext, ResourceIndex, Unresolved
-from .engine import Resource
-from .estimators import estimator_for
-from .model import Estimate, LineItem, ResourceEstimate
-from .prices import NoPriceFound, PriceClient, PriceError
-from .usage import UsageConfig, UsageError
+from bicep_cost.context import EstimateContext, ResourceIndex, UnresolvedError
+from bicep_cost.engine import Resource
+from bicep_cost.estimators import estimator_for
+from bicep_cost.model import Estimate, LineItem, ResourceEstimate
+from bicep_cost.prices import NoPriceFoundError, PriceClient, PriceError
+from bicep_cost.usage import UsageConfig, UsageError
 
 log = logging.getLogger(__name__)
 
@@ -27,9 +27,9 @@ def estimate_resources(
             continue
         try:
             est = estimator(res, ctx)
-        except Unresolved as exc:
+        except UnresolvedError as exc:
             est = ResourceEstimate(res, "unresolved", notes=[str(exc)])
-        except NoPriceFound as exc:
+        except NoPriceFoundError as exc:
             est = ResourceEstimate(res, "unresolved", notes=[str(exc)])
         except (PriceError, UsageError):
             raise

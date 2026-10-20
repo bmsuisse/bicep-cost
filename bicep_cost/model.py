@@ -3,8 +3,8 @@
 from dataclasses import dataclass, field
 from typing import Literal
 
-from .engine import Resource
-from .prices import Meter
+from bicep_cost.engine import Resource
+from bicep_cost.prices import Meter
 
 # fixed: follows from the template; usage: depends on assumed consumption; free: costs nothing.
 CostBasis = Literal["fixed", "usage"]

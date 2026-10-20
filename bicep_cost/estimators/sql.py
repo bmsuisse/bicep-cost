@@ -3,11 +3,11 @@
 import re
 from dataclasses import dataclass
 
-from ..context import HOURS_PER_MONTH, EstimateContext, Unresolved, as_number, need_str
-from ..engine import Resource
-from ..model import LineItem, ResourceEstimate
-from ..prices import Meter, NoPriceFound
-from .common import free, included, line, node_price, priced
+from bicep_cost.context import HOURS_PER_MONTH, EstimateContext, UnresolvedError, as_number, need_str
+from bicep_cost.engine import Resource
+from bicep_cost.estimators.common import free, included, line, node_price, priced
+from bicep_cost.model import LineItem, ResourceEstimate
+from bicep_cost.prices import Meter, NoPriceFoundError
 
 SERVICE = "SQL Database"
 DAYS_PER_MONTH = HOURS_PER_MONTH / 24
@@ -56,15 +56,15 @@ def parse_sku(name: str) -> SqlSku:
         return SqlSku("dtu", "Premium", dtu_label=f"P{m.group(1)}")
     if m := re.fullmatch(r"(gp|bc|hs)(_s)?_([a-z0-9]+)_(\d+)", low):
         return SqlSku("vcore", TIER_NAMES[m.group(1).upper()], m.group(3), int(m.group(4)), serverless=bool(m.group(2)))
-    if low.startswith("dw") or low.startswith("datawarehouse"):
+    if low.startswith(("dw", "datawarehouse")):
         return SqlSku("unsupported")
-    raise Unresolved(f"unrecognised SQL SKU {name!r}")
+    raise UnresolvedError(f"unrecognised SQL SKU {name!r}")
 
 
 def _family_label(family: str) -> str:
     label = FAMILY_LABELS.get(family.lower())
     if label is None:
-        raise Unresolved(f"SQL hardware family {family!r} is not priced")
+        raise UnresolvedError(f"SQL hardware family {family!r} is not priced")
     return label
 
 
@@ -86,7 +86,7 @@ def _storage_meter(
         name = m.name.lower()
         if needle.lower() in name and not any(x.lower() in name for x in exclude):
             return m
-    raise NoPriceFound(f"no SQL storage price '{needle}' in {product} ({region})")
+    raise NoPriceFoundError(f"no SQL storage price '{needle}' in {product} ({region})")
 
 
 def _vcore_items(
@@ -214,7 +214,7 @@ def estimate_database(res: Resource, ctx: EstimateContext) -> ResourceEstimate:
         return priced(res, items, notes)
     vcores = sku.vcores
     if vcores <= 0:
-        raise Unresolved("vCore count of the SQL SKU is not known")
+        raise UnresolvedError("vCore count of the SQL SKU is not known")
     default_gb = max_gb or DEFAULT_STORAGE_GB[sku.tier]
     storage_gb = ctx.usage.number("sqldatabases", res.name, "storage_gb", default_gb)
     replicas = int(as_number(res.get("properties.highAvailabilityReplicaCount"), 0)) if sku.tier == "Hyperscale" else 0
@@ -233,7 +233,7 @@ def estimate_elastic_pool(res: Resource, ctx: EstimateContext) -> ResourceEstima
         tier = low.removesuffix("pool").capitalize()
         meter = ctx.meter(SERVICE, region, product=f"SQL Database Elastic Pool - {tier}", sku="1 DTU")
         if capacity <= 0:
-            raise Unresolved("eDTU capacity of the pool is not known")
+            raise UnresolvedError("eDTU capacity of the pool is not known")
         return priced(
             res,
             [line(f"{tier} pool {capacity} eDTUs", meter, capacity * DAYS_PER_MONTH)],
@@ -241,7 +241,7 @@ def estimate_elastic_pool(res: Resource, ctx: EstimateContext) -> ResourceEstima
         )
     sku = parse_sku(f"{name}_{capacity}" if capacity else name)
     if sku.model != "vcore" or sku.vcores <= 0:
-        raise Unresolved(f"unrecognised elastic pool SKU {name!r} (capacity {capacity})")
+        raise UnresolvedError(f"unrecognised elastic pool SKU {name!r} (capacity {capacity})")
     max_gb = as_number(res.get("properties.maxSizeBytes"), 0.0) / GIB
     storage_gb = ctx.usage.number("sqlelasticpools", res.name, "storage_gb", max_gb or DEFAULT_STORAGE_GB[sku.tier])
     items, notes = _vcore_items(
@@ -261,11 +261,11 @@ def estimate_managed_instance(res: Resource, ctx: EstimateContext) -> ResourceEs
     name = need_str(res, "sku.name", "managed instance SKU").lower()
     m = re.fullmatch(r"(gp|bc)_([a-z0-9]+)", name)
     if not m or m.group(2) not in MI_PRODUCTS:
-        raise Unresolved(f"unrecognised managed instance SKU {name!r}")
+        raise UnresolvedError(f"unrecognised managed instance SKU {name!r}")
     tier = "General Purpose" if m.group(1) == "gp" else "Business Critical"
     vcores = int(as_number(res.get("properties.vCores"), as_number(res.get("sku.capacity"), 0)))
     if vcores <= 0:
-        raise Unresolved("vCore count of the managed instance is not known")
+        raise UnresolvedError("vCore count of the managed instance is not known")
     region = ctx.region(res)
     product = f"SQL Managed Instance {tier} - {MI_PRODUCTS[m.group(2)]}"
     meters = ctx.meters("SQL Managed Instance", region, product=product)
@@ -282,7 +282,7 @@ def estimate_managed_instance(res: Resource, ctx: EstimateContext) -> ResourceEs
         storage_meters = ctx.meters("SQL Managed Instance", region, product=f"SQL Managed Instance {tier} - Storage")
         stor = next((s for s in storage_meters if s.name.endswith("Data Stored") and "Zone" not in s.name), None)
         if stor is None:
-            raise NoPriceFound(f"no managed instance storage price for {tier} in {region}")
+            raise NoPriceFoundError(f"no managed instance storage price for {tier} in {region}")
         items.append(line(f"Storage above the included 32 GB: {extra:g} GB", stor, extra))
     notes = ["backup storage above the free allowance and IOPS above the included amount are not priced"]
     if str(res.get("properties.licenseType") or "").lower() == "baseprice":

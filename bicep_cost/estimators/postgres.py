@@ -2,10 +2,10 @@
 
 import re
 
-from ..context import HOURS_PER_MONTH, EstimateContext, Unresolved, as_number, need_str
-from ..engine import Resource
-from ..model import LineItem, ResourceEstimate
-from .common import line, node_price, priced
+from bicep_cost.context import HOURS_PER_MONTH, EstimateContext, UnresolvedError, as_number, need_str
+from bicep_cost.engine import Resource
+from bicep_cost.estimators.common import line, node_price, priced
+from bicep_cost.model import LineItem, ResourceEstimate
 
 TIER_LABELS = {
     "generalpurpose": "General Purpose",
@@ -20,7 +20,7 @@ def parse_sku(name: str) -> tuple[str, int, str]:
     """``Standard_D2ds_v5`` -> (series ``Ddsv5``, vcores 2, letters ``ds``)."""
     m = re.fullmatch(r"Standard_([A-Za-z])(\d+)([a-z]*)(?:_(v\d+))?", name, flags=re.IGNORECASE)
     if not m:
-        raise Unresolved(f"unrecognised PostgreSQL SKU {name!r}")
+        raise UnresolvedError(f"unrecognised PostgreSQL SKU {name!r}")
     family, vcores, feat, version = m.group(1).upper(), int(m.group(2)), m.group(3).lower(), (m.group(4) or "").lower()
     return f"{family}{feat}{version}", vcores, feat
 
@@ -30,7 +30,7 @@ def estimate_server(res: Resource, ctx: EstimateContext) -> ResourceEstimate:
     tier_raw = need_str(res, "sku.tier", "PostgreSQL tier")
     tier = TIER_LABELS.get(tier_raw.lower())
     if tier is None:
-        raise Unresolved(f"unrecognised PostgreSQL tier {tier_raw!r}")
+        raise UnresolvedError(f"unrecognised PostgreSQL tier {tier_raw!r}")
     region = ctx.region(res)
     series, vcores, _ = parse_sku(sku_name)
     ha_mode = str(res.get("properties.highAvailability.mode") or "Disabled")
@@ -58,7 +58,7 @@ def estimate_server(res: Resource, ctx: EstimateContext) -> ResourceEstimate:
             compute, qty_multiplier = node_price(meters, vcores)
         break
     if compute is None:
-        raise Unresolved(f"no PostgreSQL compute price for {sku_name} ({tier}) in {region}")
+        raise UnresolvedError(f"no PostgreSQL compute price for {sku_name} ({tier}) in {region}")
     qty = HOURS_PER_MONTH * multiplier * qty_multiplier
     label = f"{sku_name} ({tier})" + (" x2 (high availability)" if multiplier == 2 else "")
     items.append(line(f"Compute {label}", compute, qty))

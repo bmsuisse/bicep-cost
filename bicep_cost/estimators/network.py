@@ -1,9 +1,9 @@
 """Private endpoints and Private DNS zones."""
 
-from ..context import HOURS_PER_MONTH, EstimateContext
-from ..engine import Resource
-from ..model import ResourceEstimate
-from .common import line, priced
+from bicep_cost.context import HOURS_PER_MONTH, EstimateContext
+from bicep_cost.engine import Resource
+from bicep_cost.estimators.common import line, priced
+from bicep_cost.model import ResourceEstimate
 
 
 def estimate_private_endpoint(res: Resource, ctx: EstimateContext) -> ResourceEstimate:

@@ -2,13 +2,14 @@
 
 import re
 
-from ..armexpr import JsonValue
-from ..context import HOURS_PER_MONTH, SECONDS_PER_MONTH, EstimateContext, Unresolved, as_number, need_str
-from ..engine import Resource
-from ..model import LineItem, ResourceEstimate
-from ..usage import UsageError
-from .common import included, line, priced, usage_amount
-from .cron import active_hours_per_month, extra_replica_hours_per_month
+from bicep_cost.armexpr import JsonValue
+from bicep_cost.context import HOURS_PER_MONTH, SECONDS_PER_MONTH, EstimateContext, UnresolvedError, as_number, need_str
+from bicep_cost.engine import Resource
+from bicep_cost.estimators.common import included, line, priced, usage_amount
+from bicep_cost.estimators.cron import active_hours_per_month, extra_replica_hours_per_month
+from bicep_cost.model import LineItem, ResourceEstimate
+from bicep_cost.prices import Meter
+from bicep_cost.usage import UsageError
 
 # Monthly free grants per subscription (not modelled by the retail price API).
 FREE_VCPU_SECONDS = 180_000.0
@@ -36,7 +37,7 @@ def parse_memory_gib(value: object) -> float:
         if m:
             amount = float(m.group(1))
             return amount / 1024 if m.group(2) in ("Mi", "M") else amount
-    raise Unresolved(f"cannot read container memory {value!r}")
+    raise UnresolvedError(f"cannot read container memory {value!r}")
 
 
 def estimate_environment(res: Resource, ctx: EstimateContext) -> ResourceEstimate:
@@ -93,7 +94,7 @@ def _sum_resources(containers: JsonValue) -> tuple[float, float]:
 def _containers_size(res: Resource) -> tuple[float, float]:
     cpu, gib = _sum_resources(res.get("properties.template.containers", []))
     if cpu == 0:
-        raise Unresolved(f"container resources of {res.name} are not known")
+        raise UnresolvedError(f"container resources of {res.name} are not known")
     return cpu, gib
 
 
@@ -155,7 +156,7 @@ def estimate_container_app(res: Resource, ctx: EstimateContext) -> ResourceEstim
     scope = f"sub:{res.subscription_id}"
     items: list[LineItem] = []
 
-    def meter(name: str):
+    def meter(name: str) -> Meter:
         return ctx.meter("Azure Container Apps", region, sku="Standard", meter=name)
 
     basis = "usage" if (extra_hours or measured is not None) else "fixed"

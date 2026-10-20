@@ -4,7 +4,7 @@ import json
 from collections import defaultdict
 from datetime import UTC, datetime
 
-from .collectors import Finding
+from bicep_cost.collect.collectors import Finding
 
 
 def _quote(text: str) -> str:

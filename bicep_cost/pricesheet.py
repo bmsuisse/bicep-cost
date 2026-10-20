@@ -11,8 +11,8 @@ from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .collect.arm import ARM, Transport
-from .prices import MAX_PAGES, Meter, NoPriceFound, PriceError, Tier, normalize_currency
+from bicep_cost.collect.arm import ARM, Transport
+from bicep_cost.prices import MAX_PAGES, Meter, NoPriceFoundError, PriceError, Tier, normalize_currency
 
 
 @dataclass(frozen=True)
@@ -167,10 +167,10 @@ class PriceSheet:
             with os.fdopen(fd, "w") as stream:
                 json.dump(data, stream, indent=2, allow_nan=False)
                 stream.write("\n")
-            os.replace(temporary, path)
+            Path(temporary).replace(path)
         finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
+            if Path(temporary).exists():
+                Path(temporary).unlink()
 
     def apply(self, meter: Meter) -> Meter:
         """Replace matched account rates; retain retail rates for missing account meters."""
@@ -182,7 +182,7 @@ class PriceSheet:
         retail_scale, retail_unit = _unit(meter.unit)
         sheet_scale, sheet_unit = _unit(tiers[0].unit)
         if retail_unit != sheet_unit:
-            raise NoPriceFound(
+            raise NoPriceFoundError(
                 f"incompatible units for account meter {meter.meter_id}: {tiers[0].unit} vs {meter.unit}"
             )
         factor = retail_scale / sheet_scale
