@@ -34,6 +34,7 @@ class ResourceJson(TypedDict):
 
 class EstimateJson(TypedDict):
     source: str
+    price_source: str
     currency: str
     total_monthly: float
     fixed_monthly: float
@@ -77,12 +78,13 @@ def to_json(est: Estimate, source: str, diagnostics: list[Diagnostic]) -> Estima
         )
     return {
         "source": source,
+        "price_source": est.price_source,
         "currency": est.currency,
         "total_monthly": round(est.monthly, 6),
         "fixed_monthly": round(est.fixed, 6),
         "usage_monthly": round(est.usage, 6),
         "resources": resources,
-        "warnings": [f"{d.where}: {d.message}" if d.where else d.message for d in diagnostics],
+        "warnings": est.warnings + [f"{d.where}: {d.message}" if d.where else d.message for d in diagnostics],
         "assumptions": est.assumptions,
     }
 
@@ -146,15 +148,34 @@ def _group_rows(est: Estimate, group_by: str) -> list[tuple[str, int, float, flo
     return sorted(((k, int(v[0]), v[1], v[2]) for k, v in totals.items()), key=lambda t: -(t[2] + t[3]))
 
 
+def render_chart(est: Estimate, group_by: str = "resource") -> str:
+    """Plain-text bars of known monthly costs, largest first, suitable for CI logs."""
+    if group_by in ("type", "module"):
+        rows = [(key, fixed + usage) for key, _, fixed, usage in _group_rows(est, group_by)]
+    else:
+        rows = [(r.resource.address, r.monthly) for r in _billed(est)]
+    rows = [(name, cost) for name, cost in rows if cost > 0]
+    if not rows:
+        return "Monthly cost breakdown: no positive priced costs."
+    peak = rows[0][1]
+    lines = [f"Monthly cost breakdown ({est.currency}/month; share of known total)", ""]
+    for name, cost in rows:
+        bar = "#" * max(1, round(cost / peak * 32))
+        lines.append(f"{name}")
+        lines.append(f"  {bar:<32}  {money(cost, est.currency)}  ({cost / est.monthly * 100:.1f}%)")
+    return "\n".join(lines)
+
+
 def render_text(
     est: Estimate, source: str, diagnostics: list[Diagnostic], detail: bool = False, group_by: str = "resource"
 ) -> str:
     cur = est.currency
     out: list[str] = [
         f"Monthly cost estimate for {source}",
-        f"Prices: Azure Retail Prices API ({cur}, list price, pay-as-you-go), default region {est.region_default}",
+        f"Prices: {est.price_source} ({cur}), default region {est.region_default}",
         "",
     ]
+    out.extend([render_chart(est, group_by), ""])
     billed = _billed(est)
     if group_by in ("type", "module"):
         rows = _group_rows(est, group_by)
@@ -206,6 +227,9 @@ def render_text(
     if external_res:
         out += ["", "Hosted outside this template (cost NOT included):"]
         out += [f"  > {r.resource.type} {r.resource.name}: {'; '.join(r.notes)}" for r in external_res]
+    if est.warnings:
+        out += ["", "Pricing warnings:"]
+        out += [f"  ! {warning}" for warning in est.warnings]
     if est.default_assumptions:
         out += [
             "",
@@ -227,6 +251,10 @@ def render_markdown(est: Estimate, source: str, diagnostics: list[Diagnostic]) -
     cur = est.currency
     lines = [
         f"### Azure cost estimate — `{source}`",
+        "",
+        "```text",
+        render_chart(est).replace("`", "'"),
+        "```",
         "",
         f"| | {cur}/month |",
         "|---|---:|",
@@ -251,7 +279,10 @@ def render_markdown(est: Estimate, source: str, diagnostics: list[Diagnostic]) -
         lines += ["", "**Not included:**"]
         lines += [f"- `{r.resource.type}` {r.resource.name}: {'; '.join(r.notes)}" for r in unresolved]
         lines += [f"- `{t}` (no estimator)" for t in sorted({r.resource.type for r in unsupported})]
-    lines += ["", "_List prices from the Azure Retail Prices API; usage-based amounts use assumed consumption._", ""]
+    if est.warnings:
+        lines += ["", "**Pricing warnings:**"]
+        lines += [f"- {warning}" for warning in est.warnings]
+    lines += ["", f"_{est.price_source}; usage-based amounts use assumed consumption._", ""]
     return "\n".join(lines)
 
 

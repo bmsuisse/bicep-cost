@@ -115,7 +115,7 @@ default = 0
 
 Anything else is listed under *Not covered by this tool (cost NOT included)*; use `--strict` to fail in that case.
 Premium storage, ASE stamps, bandwidth/egress and reservations are not modelled; prices are pay-as-you-go **list
-prices** unless you add `[discounts]`.
+prices** unless you add `[discounts]` or opt into account price sheets (below).
 
 Add a resource type by writing `estimate_x(res, ctx) -> ResourceEstimate` in `bicep_cost/estimators/` and registering it
 in `estimators/__init__.py`.
@@ -161,3 +161,104 @@ Diffs require both reports to use the same currency.
 
 Azure's non-USD retail rates are budget estimates, not negotiated billing rates.
 See [Microsoft's Retail Prices API currency documentation](https://learn.microsoft.com/rest/api/cost-management/retail-prices/azure-retail-prices).
+
+## Percentage cost caps in CI
+
+Save a baseline estimate (using the same currency and usage assumptions), then
+fail if the new monthly cost grows by more than 10 percent:
+
+```sh
+bicep-cost estimate main.bicep --format json -o base.json
+# After changing the template:
+bicep-cost estimate main.bicep --baseline base.json --fail-increase-percent 10 --fail-above 1500
+# Or compare two saved JSON reports:
+bicep-cost diff base.json head.json --fail-increase-percent 10 --fail-above 1500
+```
+
+Either exceeded cap returns **3**. Equality and decreases pass; any positive cost
+from a zero baseline fails the relative cap. Thresholds must be finite and
+nonnegative. The full report is written before a budget failure, including with
+`--output`, so CI can always retain it. `--strict` failures still take precedence
+(exit 2). Baseline reports must use the same currency; no conversion is applied.
+
+## Cost breakdown charts
+
+Text and Markdown estimates include horizontal bars ordered from the most
+expensive resource to the least. Each bar shows the monthly amount and share of
+the known total. Text `--group-by type` or `--group-by module` aggregates both the
+chart and table. Zero-cost resources do not get bars; unresolved and unsupported
+resources remain listed below, since their costs are not included in the total.
+Charts are plain text for readable CI logs and Markdown PR comments, and are
+written even when a budget cap fails. JSON and CSV remain machine-readable.
+
+## Automatic releases
+
+Like [bmsui](https://github.com/bmsuisse/bmsui/blob/main/.github/workflows/release.yml),
+main pushes run reusable CI, detect a new package version, publish to PyPI using
+OIDC, and create a GitHub release with wheel/sdist assets. PR CI checks Ruff, ty,
+tests, builds and an installed-wheel smoke test on Python 3.11 and 3.14.
+
+Before the first merge, a PyPI maintainer must register a
+[pending trusted publisher](https://docs.pypi.org/trusted-publishers/creating-a-project-through-oidc/):
+project **bicep-cost**, owner **bmsuisse**, repository **bicep-cost**, workflow
+**release.yml**, environment **pypi**. Use the same environment in GitHub;
+restrict its deployment branches to `main`. No long-lived PyPI token is needed.
+
+Bump `[project] version` in `pyproject.toml`, run `uv lock`, and merge the PR.
+Main publishes that version after CI passes; an existing GitHub release is
+skipped. The Release workflow can also be dispatched manually from main; its
+**dry_run** input defaults to true, validating without publishing. Release jobs
+are serialized. If publication succeeded but release creation failed, rerun the
+workflow: existing PyPI files are skipped and GitHub release creation is retried.
+Do not change files for a version already uploaded to PyPI; bump the version.
+
+## Azure account prices
+
+Retail prices remain the default and require no login. To use negotiated
+consumption rates through the logged-in Azure CLI user:
+
+```sh
+az login
+bicep-cost estimate main.bicep --azure-prices --subscription-id YOUR_SUBSCRIPTION_ID
+# Persist a private snapshot while estimating:
+bicep-cost estimate main.bicep --azure-prices --save-price-sheet account-prices.json
+# Or download separately:
+bicep-cost price-sheet --subscription-id YOUR_SUBSCRIPTION_ID -o account-prices.json
+# Reuse without Azure login:
+bicep-cost estimate main.bicep --price-sheet account-prices.json
+```
+
+Without a subscription argument, downloads use the CLI's current subscription.
+The read-only [Consumption Price Sheet API](https://learn.microsoft.com/rest/api/consumption/price-sheet/get)
+requires access to the subscription's pricing and a supported billing agreement.
+An ordinary Azure login alone does not guarantee access. Unsupported agreements,
+missing sheets and denied access produce an error. Within a successfully loaded
+price sheet, missing meter rates fall back to retail prices with warnings.
+
+For MCA/MPA accounts, or when subscription downloads are unavailable, download
+and extract the current consumption price-sheet CSV from
+[Cost Management + Billing](https://learn.microsoft.com/azure/cost-management-billing/manage/ea-pricing),
+then use `--price-sheet prices.csv`. The importer accepts case-insensitive column
+names `meterId`, optional `skuId`, `currencyCode` or `currency`, `unitOfMeasure`,
+`unitPrice`, optional `tierMinimumUnits` and `priceType`. It uses **price currency**,
+not `billingCurrency`; reservations and savings-plan rows are excluded. Import a
+single current price period: conflicting duplicate rates are rejected. Legacy
+CSV layouts must be converted to these columns first. Included-quantity grants
+are rejected because the sheet does not supply enough billing-scope information
+to allocate them safely.
+
+Account mode discovers meter identities through the Retail API, then replaces
+rates by meter/SKU ID, normalizing compatible block units (for example 100 Hours
+to 1 Hour). Missing account meter rates use retail prices with an explicit pricing
+warning in text, Markdown, and JSON reports; `--strict` does not block this
+fallback. Resources with no retail meter still become unresolved. Manual `[discounts]` are ignored because account rates
+already include discounts. Reports record the sheet's origin and snapshot time.
+Explicit `--currency` and usage-file currency must match the sheet; by default
+its currency is selected. No exchange-rate conversion is performed.
+
+Snapshots contain negotiated rates, not Azure tokens, and are saved atomically
+with owner-only permissions. Keep them private and out of source control. Saved
+sheets can be used without login; completely offline estimates also need the
+Retail API metadata in the normal price cache. Use `--price-sheet FILE --offline`
+for that; `--azure-prices` always downloads fresh rates. Snapshots are not refreshed
+automatically, so download a new sheet when your agreement or billing period changes.

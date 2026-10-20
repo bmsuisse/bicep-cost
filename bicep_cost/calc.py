@@ -19,6 +19,7 @@ def estimate_resources(
 ) -> Estimate:
     ctx = EstimateContext(prices=prices, usage=usage, index=ResourceIndex(resources), default_region=default_region)
     results: list[ResourceEstimate] = []
+    warnings: list[str] = []
     for res in resources:
         estimator = estimator_for(res.type)
         if estimator is None:
@@ -35,22 +36,34 @@ def estimate_resources(
         except Exception as exc:  # an estimator bug must not hide the other resources
             log.debug("estimator failed for %s", res.address, exc_info=True)
             est = ResourceEstimate(res, "unresolved", notes=[f"internal estimator error: {exc!r}"])
+        # https://github.com/bmsuisse/bicep-cost/issues/12
+        missing = [i.meter.label() for i in est.items if i.quantity > 0 and i.meter and i.meter.account_price_missing]
+        for label in dict.fromkeys(missing):
+            warning = f"{res.address}: no account price for {label}; using retail price"
+            est.notes.append(warning)
+            warnings.append(warning)
         if res.id in ctx.assumed_region:
             est.notes.append(f"location not known; priced in default region {default_region}")
         results.append(est)
     apply_pricing(results)
     for est in results:
-        pct = usage.discount_percent(est.resource.type)
+        pct = 0.0 if prices.price_sheet else usage.discount_percent(est.resource.type)
         if pct and est.items:
             for item in est.items:
                 if item.fixed_amount is None:  # user-supplied / measured actual costs are already net of discounts
                     item.monthly *= 1 - pct / 100
             est.notes.append(f"{pct:g}% discount from the usage file's [discounts] applied")
     return Estimate(
+        price_source=(
+            f"Account price sheet: {prices.price_sheet.source} (snapshot {prices.price_sheet.fetched_at}); "
+            "retail fallback where needed; manual discounts ignored"
+            if prices.price_sheet
+            else "Azure Retail Prices API (list price, pay-as-you-go)"
+        ),
         currency=prices.currency,
         region_default=default_region,
         resources=results,
-        warnings=[],
+        warnings=warnings,
         assumptions=[a.render() for a in usage.assumptions()],
         default_assumptions=sum(1 for a in usage.assumptions() if a.from_default),
     )

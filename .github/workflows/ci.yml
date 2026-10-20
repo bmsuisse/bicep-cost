@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.11', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - run: uv sync --locked --all-groups
+      - run: uv run ruff check .
+      - run: uv run ty check
+      - run: uv run pytest
+      - run: uv build
+      - name: Smoke-test installed wheel outside the checkout
+        run: |
+          uv venv /tmp/bicep-cost-smoke
+          uv pip install --python /tmp/bicep-cost-smoke/bin/python dist/*.whl
+          cd /tmp
+          /tmp/bicep-cost-smoke/bin/bicep-cost --help

@@ -54,6 +54,7 @@ class Estimate:
     warnings: list[str]
     assumptions: list[str]
     default_assumptions: int = 0
+    price_source: str = "Azure Retail Prices API (list price, pay-as-you-go)"
 
     @property
     def monthly(self) -> float:

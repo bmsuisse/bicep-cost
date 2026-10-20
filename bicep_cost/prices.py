@@ -16,7 +16,10 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
+
+if TYPE_CHECKING:
+    from .pricesheet import PriceSheet
 
 log = logging.getLogger(__name__)
 
@@ -78,6 +81,7 @@ class Meter:
     tiers: tuple[Tier, ...]
     arm_sku: str = ""
     sku_id: str = ""
+    account_price_missing: bool = False
 
     @property
     def key(self) -> str:
@@ -187,6 +191,7 @@ class PriceClient:
     offline: bool = False
     refresh: bool = False
     fetcher: Fetcher = _http_fetch
+    price_sheet: "PriceSheet | None" = None
     queries_made: int = 0
     _memo: dict[str, tuple[Meter, ...]] = field(default_factory=dict)
 
@@ -238,6 +243,10 @@ class PriceClient:
         if cached is not None:
             return cached
         meters = group_meters(self._raw_items(odata_filter), self.currency, now or datetime.now(UTC))
+        if self.price_sheet is not None:
+            if self.price_sheet.currency != self.currency:
+                raise PriceError("account price sheet currency differs from requested currency")
+            meters = tuple(self.price_sheet.apply(m) for m in meters)
         self._memo[odata_filter] = meters
         return meters
 
