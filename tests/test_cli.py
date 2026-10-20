@@ -225,3 +225,19 @@ def test_invalid_usage_value_is_a_clean_error(capsys, tmp_path):
     code, _, err = run_cli(capsys, "estimate", str(tmp_path / "t.json"), "--usage", str(tmp_path / "u.toml"))
     assert code == 1
     assert "idle_percent" in err
+
+
+@pytest.mark.parametrize("currency", [None, "chf"])
+def test_usage_currency_default_and_conflict(currency, tmp_path, capsys):
+    template = tmp_path / "empty.json"
+    template.write_text('{"resources": []}')
+    usage = tmp_path / "empty.usage.toml"
+    usage.write_text('[meta]\ncost_currency = "CHF"\n')
+    args = ["--currency", currency] if currency else []
+    code, out, _ = run_cli(capsys, "estimate", str(template), "--format", "json", *args)
+    assert code == 0
+    assert json.loads(out)["currency"] == "CHF"
+    code, out, err = run_cli(capsys, "estimate", str(template), "--currency", "USD")
+    assert code == 1
+    assert not out
+    assert "conversion is not supported" in err

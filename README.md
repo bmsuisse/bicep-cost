@@ -141,3 +141,23 @@ uv sync --group test --group dev
 uv run -m pytest
 uv run ruff check . && uv run ty check
 ```
+
+## Currency
+
+Estimates use **USD** by default. Set `--currency CHF` (or `EUR`, for example) on
+`estimate` and `prices` to request that currency directly from Azure:
+
+```sh
+bicep-cost estimate main.bicep --currency CHF
+bicep-cost prices --service "Key Vault" --currency EUR
+```
+
+For estimates the precedence is `--currency`, then `[meta] cost_currency` in the
+usage TOML, then USD. Codes are case insensitive. Reports and budget limits use
+the selected currency; cached prices are isolated by currency. Manual
+`monthly_cost` values must use the same currency as the estimate; conflicting
+usage-file metadata is rejected. No exchange-rate conversion is performed.
+Diffs require both reports to use the same currency.
+
+Azure's non-USD retail rates are budget estimates, not negotiated billing rates.
+See [Microsoft's Retail Prices API currency documentation](https://learn.microsoft.com/rest/api/cost-management/retail-prices/azure-retail-prices).

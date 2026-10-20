@@ -77,3 +77,31 @@ def test_group_meters_keeps_skus_that_share_a_meter_id_apart():
     b = item("S", "P", "4 vCore", "vCore", 2.0, meter_id="shared")
     meters = group_meters([a, b], "USD", datetime(2026, 10, 1, tzinfo=UTC))
     assert {m.sku: m.unit_price for m in meters} == {"2 vCore": 1.0, "4 vCore": 2.0}
+
+
+def test_currency_request_and_cache_isolation(tmp_path):
+    import json
+    import urllib.parse
+
+    def fetch(url: str) -> bytes:
+        currency = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)["currencyCode"][0]
+        row = item("S", "P", "K", "M", 2.0 if currency == "CHF" else 3.0)
+        row["currencyCode"] = currency
+        return json.dumps({"Items": [row]}).encode()
+
+    for code, amount in ((" chf ", 2.0), ("USD", 3.0)):
+        client = PriceClient(currency=code, cache_dir=tmp_path, fetcher=fetch)
+        assert client.query("x")[0].unit_price == amount
+        cached = PriceClient(currency=code, cache_dir=tmp_path, offline=True)
+        assert cached.query("x")[0].currency == code.strip().upper()
+
+
+def test_currency_rejects_invalid_codes_and_mismatched_responses():
+    import pytest
+
+    from bicep_cost.prices import PriceError
+
+    with pytest.raises(PriceError, match="three-letter"):
+        PriceClient(currency="dollars")
+    with pytest.raises(PriceError, match="requested CHF"):
+        group_meters([item("S", "P", "K", "M", 1)], "CHF", datetime.now(UTC))
