@@ -1,0 +1,79 @@
+from datetime import UTC, datetime
+
+from bicep_cost.prices import Meter, PriceClient, Tier, build_filter, group_meters, normalize_region
+
+from .conftest import item
+
+
+def meter(*tiers: tuple[float, float]) -> Meter:
+    return Meter("m", "s", "p", "k", "n", "r", "u", "USD", tuple(Tier(a, b) for a, b in tiers))
+
+
+def test_tiered_cost():
+    m = meter((0, 0.0), (5, 3.0))
+    assert m.cost(3) == 0
+    assert m.cost(8) == 9.0
+    assert m.cost(2, already_consumed=5) == 6.0
+    flat = meter((0, 0.5))
+    assert flat.cost(10) == 5.0
+    assert flat.cost(0) == 0
+
+
+def test_unit_price_skips_free_tier():
+    assert meter((0, 0.0), (5, 3.0)).unit_price == 3.0
+
+
+def test_filter_escapes_quotes_and_builds_clauses():
+    flt = build_filter("Azure O'Neil", "westeurope", product="P", meter_contains="X")
+    assert "serviceName eq 'Azure O''Neil'" in flt
+    assert "priceType eq 'Consumption'" in flt
+    assert "productName eq 'P'" in flt
+    assert "contains(meterName, 'X')" in flt
+
+
+def test_group_meters_picks_latest_effective_row_and_ignores_future():
+    old = item("S", "P", "K", "M", 1.0)
+    old["effectiveStartDate"] = "2026-01-01T00:00:00Z"
+    new = item("S", "P", "K", "M", 2.0)
+    new["effectiveStartDate"] = "2026-06-01T00:00:00Z"
+    future = item("S", "P", "K", "M", 9.0)
+    future["effectiveStartDate"] = "2099-01-01T00:00:00Z"
+    (m,) = group_meters([old, new, future], "USD", datetime(2026, 10, 1, tzinfo=UTC))
+    assert m.tiers == (Tier(0.0, 2.0),)
+
+
+def test_region_fallback_and_memoisation(prices: PriceClient):
+    pe = prices.find("Virtual Network", "westeurope", meter="Standard Private Endpoint")
+    assert pe is not None
+    assert pe.region == "Global"
+    before = prices.queries_made
+    prices.find("Virtual Network", "westeurope", meter="Standard Private Endpoint")
+    assert prices.queries_made == before
+
+
+def test_disk_cache_roundtrip_and_offline(tmp_path):
+    from .conftest import fake_fetcher
+
+    calls = []
+
+    def counting(url: str) -> bytes:
+        calls.append(url)
+        return fake_fetcher(url)
+
+    first = PriceClient(cache_dir=tmp_path, fetcher=counting)
+    assert first.find("Key Vault", "westeurope", meter="Operations") is not None
+    second = PriceClient(cache_dir=tmp_path, fetcher=counting, offline=True)
+    assert second.find("Key Vault", "westeurope", meter="Operations") is not None
+    assert len(calls) == 1
+
+
+def test_normalize_region():
+    assert normalize_region("West Europe", "x") == "westeurope"
+    assert normalize_region(None, "westeurope") == "westeurope"
+
+
+def test_group_meters_keeps_skus_that_share_a_meter_id_apart():
+    a = item("S", "P", "2 vCore", "vCore", 1.0, meter_id="shared")
+    b = item("S", "P", "4 vCore", "vCore", 2.0, meter_id="shared")
+    meters = group_meters([a, b], "USD", datetime(2026, 10, 1, tzinfo=UTC))
+    assert {m.sku: m.unit_price for m in meters} == {"2 vCore": 1.0, "4 vCore": 2.0}

@@ -1,0 +1,59 @@
+# Usage assumptions for consumption-priced meters. Everything is optional; keys that are not set use the defaults
+# shown in `bicep-cost estimate --detail` ("Usage assumptions used"). Tables are matched on the resource name:
+# `[storage]` applies to every storage account, `[storage."name*"]` (exact name or glob) wins over it.
+
+[storage]
+stored_gb = 100                 # GB held per storage account (default 10)
+write_operations_10k = 50       # in units of 10,000 operations per month (default 10)
+read_operations_10k = 500       # (default 100)
+other_operations_10k = 20       # (default 10)
+
+[storage."stprodapp"]
+stored_gb = 2000
+
+[fileshares."*/default/valkey"]
+used_gb = 20                    # standard shares are billed on used GB, not on the quota
+
+[loganalytics."app-logs"]
+ingest_gb_per_month = 40        # direct ingestion into the workspace (default 2)
+
+[appinsights."app-insights"]
+ingest_gb_per_month = 10        # shares the workspace's tier ladder and 5 GB free allowance (default 1)
+
+[containerapps."app-api"]
+replica_hours = 393             # measured replica-hours per month; replaces min replicas / cron / autoscaling from the template
+idle_percent = 60               # share of those hours billed at the (cheaper) idle rate (default 0)
+extra_replica_hours = 800       # without replica_hours: hours from http/event autoscaling on top of min replicas
+requests_millions = 50          # first 2M requests per subscription are free
+
+[sessionpools."app-sandbox"]
+session_hours = 600             # $0.03 per allocated session-hour; an idle pool costs nothing
+# monthly_cost = 4.15           # ... or the measured actual cost (`bicep-cost collect` writes this)
+
+[functions."my-func"]
+executions_per_month = 5000000
+avg_duration_ms = 800
+memory_mb = 512
+
+[appserviceplans."app-plan"]
+instances = 3                   # live instance count when autoscale / manual scaling differs from the template
+
+[postgres."app-postgres"]
+storage_gb = 64                 # live size when auto-grow made it larger than the template
+
+[servicebus]
+operations_millions = 40        # Standard: first 13 M per month are included
+
+[discounts]
+"Microsoft.Web/serverfarms" = 30   # percent off list price (EA / reservation)
+
+[keyvault]
+operations_10k = 50
+
+[privateendpoints]
+ingress_gb = 20
+egress_gb = 20
+
+# AI Foundry / Azure OpenAI is billed per token. Enter what you expect to pay (same currency as --currency).
+[cognitiveservices."ai-prod"]
+monthly_cost = 250

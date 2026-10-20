@@ -1,0 +1,43 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "skuName": {"type": "string", "defaultValue": "P1v3"},
+    "capacity": {"type": "int", "defaultValue": 1}
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2022-09-01",
+      "name": "web",
+      "properties": {
+        "expressionEvaluationOptions": {"scope": "inner"},
+        "mode": "Incremental",
+        "parameters": {
+          "sku": {"value": "[parameters('skuName')]"},
+          "capacity": {"value": "[parameters('capacity')]"}
+        },
+        "template": {
+          "parameters": {"sku": {"type": "string"}, "capacity": {"type": "int"}},
+          "resources": [
+            {
+              "type": "Microsoft.Web/serverfarms",
+              "apiVersion": "2023-12-01",
+              "name": "plan",
+              "location": "westeurope",
+              "kind": "linux",
+              "sku": {"name": "[parameters('sku')]", "capacity": "[parameters('capacity')]"},
+              "properties": {"reserved": true}
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Cdn/profiles",
+      "apiVersion": "2023-05-01",
+      "name": "cdn",
+      "location": "global"
+    }
+  ]
+}

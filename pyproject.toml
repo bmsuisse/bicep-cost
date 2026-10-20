@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bicep-cost"
+version = "0.1.0"
+description = "Estimate monthly Azure costs from Bicep / ARM templates using the public Azure Retail Prices API"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+bicep-cost = "bicep_cost.cli:main"
+
+[dependency-groups]
+dev = [
+    "ty>=0.0.59",
+    "ruff>=0.14.0",
+]
+test = [
+    "pytest>=9.1.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["bicep_cost"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
