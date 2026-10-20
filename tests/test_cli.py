@@ -241,3 +241,73 @@ def test_usage_currency_default_and_conflict(currency, tmp_path, capsys):
     assert code == 1
     assert not out
     assert "conversion is not supported" in err
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "percent", "cap", "expected"),
+    [
+        (100, 110, 10, None, 0),
+        (100, 111, 10, None, 3),
+        (100, 90, 0, None, 0),
+        (0, 0, 10, None, 0),
+        (0, 1, 10000, None, 3),
+        (100, 105, 10, 104, 3),
+        (100, 111, 10, 200, 3),
+        (100, 100, 0, 100, 0),
+    ],
+)
+def test_diff_budget_caps(old, new, percent, cap, expected, tmp_path, capsys):
+    base, head = tmp_path / "base.json", tmp_path / "head.json"
+    for path, amount in ((base, old), (head, new)):
+        path.write_text(json.dumps({"resources": [], "currency": "USD", "source": "test", "total_monthly": amount}))
+    args = ["--fail-above", str(cap)] if cap is not None else []
+    code, out, _ = run_cli(capsys, "diff", str(base), str(head), "--fail-increase-percent", str(percent), *args)
+    assert code == expected
+    assert "Cost change" in out
+
+
+def test_estimate_relative_cap_writes_report(tmp_path, capsys, fixtures_dir):
+    template = str(fixtures_dir / "app.json")
+    base, head = tmp_path / "base.json", tmp_path / "head.json"
+    run_cli(capsys, "estimate", template, "--format", "json", "-o", str(base))
+    code, out, err = run_cli(
+        capsys,
+        "estimate",
+        template,
+        "--set",
+        "capacity=2",
+        "--baseline",
+        str(base),
+        "--fail-increase-percent",
+        "10",
+        "--format",
+        "json",
+        "-o",
+        str(head),
+    )
+    assert code == 3
+    assert not out
+    assert json.loads(head.read_text())["total_monthly"] == pytest.approx(259.88)
+    assert "100.00%" in err
+    code, _, err = run_cli(capsys, "estimate", template, "--fail-increase-percent", "10")
+    assert code == 1
+    assert "requires --baseline" in err
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-1"])
+def test_budget_rejects_invalid_threshold(value):
+    with pytest.raises(SystemExit) as exc:
+        cli.build_parser().parse_args(["estimate", "t.json", f"--fail-increase-percent={value}"])
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("total", [-1, float("nan"), float("inf"), True, "100"])
+def test_baseline_rejects_invalid_totals(total, tmp_path, capsys):
+    path = tmp_path / "base.json"
+    path.write_text(json.dumps({"resources": [], "total_monthly": total, "source": "x", "currency": "USD"}))
+    code, out, err = run_cli(
+        capsys, "estimate", "missing.json", "--baseline", str(path), "--fail-increase-percent", "10"
+    )
+    assert code == 1
+    assert not out
+    assert "finite nonnegative" in err
