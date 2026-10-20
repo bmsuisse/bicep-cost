@@ -34,6 +34,7 @@ class ResourceJson(TypedDict):
 
 class EstimateJson(TypedDict):
     source: str
+    price_source: str
     currency: str
     total_monthly: float
     fixed_monthly: float
@@ -77,6 +78,7 @@ def to_json(est: Estimate, source: str, diagnostics: list[Diagnostic]) -> Estima
         )
     return {
         "source": source,
+        "price_source": est.price_source,
         "currency": est.currency,
         "total_monthly": round(est.monthly, 6),
         "fixed_monthly": round(est.fixed, 6),
@@ -170,7 +172,7 @@ def render_text(
     cur = est.currency
     out: list[str] = [
         f"Monthly cost estimate for {source}",
-        f"Prices: Azure Retail Prices API ({cur}, list price, pay-as-you-go), default region {est.region_default}",
+        f"Prices: {est.price_source} ({cur}), default region {est.region_default}",
         "",
     ]
     out.extend([render_chart(est, group_by), ""])
@@ -274,7 +276,7 @@ def render_markdown(est: Estimate, source: str, diagnostics: list[Diagnostic]) -
         lines += ["", "**Not included:**"]
         lines += [f"- `{r.resource.type}` {r.resource.name}: {'; '.join(r.notes)}" for r in unresolved]
         lines += [f"- `{t}` (no estimator)" for t in sorted({r.resource.type for r in unsupported})]
-    lines += ["", "_List prices from the Azure Retail Prices API; usage-based amounts use assumed consumption._", ""]
+    lines += ["", f"_{est.price_source}; usage-based amounts use assumed consumption._", ""]
     return "\n".join(lines)
 
 

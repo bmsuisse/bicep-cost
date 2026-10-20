@@ -15,6 +15,7 @@ from .collect.toml_out import render_usage_toml
 from .compile import CompileError, load_input
 from .engine import DeploymentSettings, Engine
 from .prices import PriceClient, PriceError, build_filter, default_cache_dir, normalize_currency
+from .pricesheet import PriceSheet
 from .report import EstimateJson, render_csv, render_diff, render_json, render_markdown, render_text
 from .usage import UsageConfig
 
@@ -112,6 +113,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_budget_args(est)
     est.add_argument("--baseline", type=Path, help="saved estimate JSON for --fail-increase-percent")
+    account = est.add_mutually_exclusive_group()
+    account.add_argument("--azure-prices", action="store_true", help="use current subscription price sheet (az login)")
+    account.add_argument("--price-sheet", type=Path, help="saved account price sheet JSON or Azure CSV")
+    est.add_argument("--save-price-sheet", type=Path, help="save the sheet fetched with --azure-prices")
     _add_cache_args(est)
 
     diff = sub.add_parser("diff", help="compare two `estimate --format json` reports")
@@ -163,6 +168,9 @@ def build_parser() -> argparse.ArgumentParser:
     prices.add_argument("--product-contains")
     prices.add_argument("--currency", default="USD")
     _add_cache_args(prices)
+    sheet = sub.add_parser("price-sheet", help="download subscription account prices using az login")
+    sheet.add_argument("--subscription-id", help="default: current Azure CLI subscription")
+    sheet.add_argument("-o", "--output", type=Path, required=True, help="normalized price sheet JSON to save")
     return parser
 
 
@@ -196,6 +204,18 @@ def discover_usage_files(template: Path, parameters: Path | None) -> list[Path]:
 
 
 def _cmd_estimate(args: argparse.Namespace) -> int:
+    if args.save_price_sheet and not args.azure_prices:
+        raise ValueError("--save-price-sheet requires --azure-prices")
+    if args.azure_prices and args.offline:
+        raise ValueError("--azure-prices requires network access; use --price-sheet with --offline")
+    sheet = PriceSheet.load(args.price_sheet) if args.price_sheet else None
+    if args.azure_prices:
+        subscription = args.subscription_id
+        if subscription == "00000000-0000-0000-0000-000000000000":
+            subscription = az_current_subscription()
+        sheet = PriceSheet.download(subscription, http_transport())
+        if args.save_price_sheet:
+            sheet.save(args.save_price_sheet)
     if args.fail_increase_percent is not None and args.baseline is None:
         raise ValueError("--fail-increase-percent requires --baseline REPORT.json")
     baseline = _load_report(args.baseline) if args.baseline else None
@@ -212,17 +232,23 @@ def _cmd_estimate(args: argparse.Namespace) -> int:
     if usage_files:
         print("bicep-cost: usage from " + ", ".join(str(f) for f in usage_files), file=sys.stderr)
     usage = UsageConfig.load(usage_files)
-    currency = normalize_currency(args.currency or usage.cost_currency or "USD")
+    currency = normalize_currency(args.currency or usage.cost_currency or (sheet.currency if sheet else "USD"))
     if usage.cost_currency and normalize_currency(usage.cost_currency) != currency:
         raise ValueError(
             f"usage file costs are in {usage.cost_currency}, but --currency is {currency}; "
             "currency conversion is not supported"
         )
+    if sheet and sheet.currency != currency:
+        raise ValueError(
+            f"account price sheet is in {sheet.currency}, estimate is in {currency}; no conversion supported"
+        )
     if baseline and baseline["currency"] != currency:
         raise ValueError("cannot compare reports in different currencies")
+    client = _client(args, currency)
+    client.price_sheet = sheet
     estimate = estimate_resources(
         engine.resources,
-        _client(args, currency),
+        client,
         usage,
         default_region=args.location.replace(" ", "").lower(),
     )
@@ -369,6 +395,11 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_estimate(args)
         if args.command == "diff":
             return _cmd_diff(args)
+        if args.command == "price-sheet":
+            sheet = PriceSheet.download(args.subscription_id or az_current_subscription(), http_transport())
+            sheet.save(args.output)
+            print(f"bicep-cost: saved {len(sheet.rates)} account meters to {args.output}", file=sys.stderr)
+            return 0
         if args.command == "collect":
             return _cmd_collect(args)
         if args.command == "init-usage":

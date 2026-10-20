@@ -40,13 +40,19 @@ def estimate_resources(
         results.append(est)
     apply_pricing(results)
     for est in results:
-        pct = usage.discount_percent(est.resource.type)
+        pct = 0.0 if prices.price_sheet else usage.discount_percent(est.resource.type)
         if pct and est.items:
             for item in est.items:
                 if item.fixed_amount is None:  # user-supplied / measured actual costs are already net of discounts
                     item.monthly *= 1 - pct / 100
             est.notes.append(f"{pct:g}% discount from the usage file's [discounts] applied")
     return Estimate(
+        price_source=(
+            f"Account price sheet: {prices.price_sheet.source} (snapshot {prices.price_sheet.fetched_at}); "
+            "manual discounts ignored"
+            if prices.price_sheet
+            else "Azure Retail Prices API (list price, pay-as-you-go)"
+        ),
         currency=prices.currency,
         region_default=default_region,
         resources=results,

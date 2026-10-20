@@ -115,7 +115,7 @@ default = 0
 
 Anything else is listed under *Not covered by this tool (cost NOT included)*; use `--strict` to fail in that case.
 Premium storage, ASE stamps, bandwidth/egress and reservations are not modelled; prices are pay-as-you-go **list
-prices** unless you add `[discounts]`.
+prices** unless you add `[discounts]` or opt into account price sheets (below).
 
 Add a resource type by writing `estimate_x(res, ctx) -> ResourceEstimate` in `bicep_cost/estimators/` and registering it
 in `estimators/__init__.py`.
@@ -211,3 +211,52 @@ skipped. The Release workflow can also be dispatched manually from main; its
 are serialized. If publication succeeded but release creation failed, rerun the
 workflow: existing PyPI files are skipped and GitHub release creation is retried.
 Do not change files for a version already uploaded to PyPI; bump the version.
+
+## Azure account prices
+
+Retail prices remain the default and require no login. To use negotiated
+consumption rates through the logged-in Azure CLI user:
+
+```sh
+az login
+bicep-cost estimate main.bicep --azure-prices --subscription-id YOUR_SUBSCRIPTION_ID
+# Persist a private snapshot while estimating:
+bicep-cost estimate main.bicep --azure-prices --save-price-sheet account-prices.json
+# Or download separately:
+bicep-cost price-sheet --subscription-id YOUR_SUBSCRIPTION_ID -o account-prices.json
+# Reuse without Azure login:
+bicep-cost estimate main.bicep --price-sheet account-prices.json
+```
+
+Without a subscription argument, downloads use the CLI's current subscription.
+The read-only [Consumption Price Sheet API](https://learn.microsoft.com/rest/api/consumption/price-sheet/get)
+requires access to the subscription's pricing and a supported billing agreement.
+An ordinary Azure login alone does not guarantee access. Unsupported agreements,
+missing sheets and denied access produce an error; no retail fallback occurs.
+
+For MCA/MPA accounts, or when subscription downloads are unavailable, download
+and extract the current consumption price-sheet CSV from
+[Cost Management + Billing](https://learn.microsoft.com/azure/cost-management-billing/manage/ea-pricing),
+then use `--price-sheet prices.csv`. The importer accepts case-insensitive column
+names `meterId`, optional `skuId`, `currencyCode` or `currency`, `unitOfMeasure`,
+`unitPrice`, optional `tierMinimumUnits` and `priceType`. It uses **price currency**,
+not `billingCurrency`; reservations and savings-plan rows are excluded. Import a
+single current price period: conflicting duplicate rates are rejected. Legacy
+CSV layouts must be converted to these columns first. Included-quantity grants
+are rejected because the sheet does not supply enough billing-scope information
+to allocate them safely.
+
+Account mode discovers meter identities through the Retail API, then replaces
+rates by meter/SKU ID, normalizing compatible block units (for example 100 Hours
+to 1 Hour). Missing account meters become unresolved; use `--strict` to block
+incomplete estimates. Manual `[discounts]` are ignored because account rates
+already include discounts. Reports record the sheet's origin and snapshot time.
+Explicit `--currency` and usage-file currency must match the sheet; by default
+its currency is selected. No exchange-rate conversion is performed.
+
+Snapshots contain negotiated rates, not Azure tokens, and are saved atomically
+with owner-only permissions. Keep them private and out of source control. Saved
+sheets can be used without login; completely offline estimates also need the
+Retail API metadata in the normal price cache. Use `--price-sheet FILE --offline`
+for that; `--azure-prices` always downloads fresh rates. Snapshots are not refreshed
+automatically, so download a new sheet when your agreement or billing period changes.
