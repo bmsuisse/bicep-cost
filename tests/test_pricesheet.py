@@ -69,6 +69,7 @@ def test_sheet_tiers_units_skus_and_missing_meter():
     assert special.unit_price == 0.4
     missing = Meter("absent", "s", "p", "k", "n", "r", "1 Hour", "CHF", ())
     assert sheet.apply(missing).account_price_missing
+    assert sheet.apply(missing).tiers == missing.tiers
     with pytest.raises(NoPriceFound, match="incompatible"):
         sheet.apply(Meter("meter", "s", "p", "k", "n", "r", "1 GB", "CHF", ()))
 
@@ -137,8 +138,9 @@ def test_cli_live_save_and_load_account_prices(tmp_path, monkeypatch, capsys):
     empty.save(saved)
     assert cli.main([*args, "--price-sheet", str(saved), "--strict"]) == 2
     report = json.loads(capsys.readouterr().out)
-    assert report["total_monthly"] == 0
-    assert any(r["status"] == "unresolved" for r in report["resources"])
+    assert report["total_monthly"] == pytest.approx(129.94)
+    assert any(r["status"] == "priced" for r in report["resources"])
+    assert any("using retail price" in warning for warning in report["warnings"])
 
 
 def test_partial_sheet_does_not_hide_storage_operations():
@@ -151,12 +153,47 @@ def test_partial_sheet_does_not_hide_storage_operations():
     sheet = PriceSheet.from_rows([row(meterId=meter_id, currencyCode="USD", unitOfMeasure="1 GB/Month")], "partial")
     prices = PriceClient(cache_dir=None, fetcher=fake_fetcher, price_sheet=sheet)
     result = estimate_resources([storage], prices, UsageConfig())
-    assert result.resources[0].status == "unresolved"
+    assert result.resources[0].status == "priced"
     assert any("Write Operations" in n for n in result.resources[0].notes)
-    assert result.monthly == 0
+    assert result.monthly == pytest.approx(200 + 10 * 0.054 + 100 * 0.0043 + 10 * 0.0043)
+    assert len(result.warnings) == 3
+    from bicep_cost.report import render_markdown, render_text
+
+    assert "using retail price" in render_text(result, "test", [])
+    assert "using retail price" in render_markdown(result, "test", [])
     zero_ops = UsageConfig(
         {"storage": {"write_operations_10k": 0, "read_operations_10k": 0, "other_operations_10k": 0}}
     )
     result = estimate_resources([storage], prices, zero_ops)
     assert result.resources[0].status == "priced"
     assert result.monthly == 200
+    assert not result.warnings
+
+
+def test_retail_fallback_does_not_fail_strict(tmp_path, monkeypatch, capsys):
+    template = tmp_path / "storage.json"
+    template.write_text(
+        json.dumps(
+            {
+                "resources": [
+                    {
+                        "type": "Microsoft.Storage/storageAccounts",
+                        "name": "store",
+                        "location": "westeurope",
+                        "sku": {"name": "Standard_LRS"},
+                    }
+                ]
+            }
+        )
+    )
+    sheet = PriceSheet.from_rows([row(meterId="unrelated")], "partial")
+    path = tmp_path / "prices.json"
+    sheet.save(path)
+    monkeypatch.setattr(
+        cli, "_client", lambda args, currency: PriceClient(currency=currency, cache_dir=None, fetcher=fake_fetcher)
+    )
+    assert cli.main(["estimate", str(template), "--price-sheet", str(path), "--strict", "--format", "json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["total_monthly"] > 0
+    assert len(report["warnings"]) == 4
+    assert all("using retail price" in warning for warning in report["warnings"])

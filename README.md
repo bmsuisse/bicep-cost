@@ -232,7 +232,8 @@ Without a subscription argument, downloads use the CLI's current subscription.
 The read-only [Consumption Price Sheet API](https://learn.microsoft.com/rest/api/consumption/price-sheet/get)
 requires access to the subscription's pricing and a supported billing agreement.
 An ordinary Azure login alone does not guarantee access. Unsupported agreements,
-missing sheets and denied access produce an error; no retail fallback occurs.
+missing sheets and denied access produce an error. Within a successfully loaded
+price sheet, missing meter rates fall back to retail prices with warnings.
 
 For MCA/MPA accounts, or when subscription downloads are unavailable, download
 and extract the current consumption price-sheet CSV from
@@ -248,8 +249,9 @@ to allocate them safely.
 
 Account mode discovers meter identities through the Retail API, then replaces
 rates by meter/SKU ID, normalizing compatible block units (for example 100 Hours
-to 1 Hour). Missing account meters become unresolved; use `--strict` to block
-incomplete estimates. Manual `[discounts]` are ignored because account rates
+to 1 Hour). Missing account meter rates use retail prices with an explicit pricing
+warning in text, Markdown, and JSON reports; `--strict` does not block this
+fallback. Resources with no retail meter still become unresolved. Manual `[discounts]` are ignored because account rates
 already include discounts. Reports record the sheet's origin and snapshot time.
 Explicit `--currency` and usage-file currency must match the sheet; by default
 its currency is selected. No exchange-rate conversion is performed.

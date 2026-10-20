@@ -19,6 +19,7 @@ def estimate_resources(
 ) -> Estimate:
     ctx = EstimateContext(prices=prices, usage=usage, index=ResourceIndex(resources), default_region=default_region)
     results: list[ResourceEstimate] = []
+    warnings: list[str] = []
     for res in resources:
         estimator = estimator_for(res.type)
         if estimator is None:
@@ -37,8 +38,10 @@ def estimate_resources(
             est = ResourceEstimate(res, "unresolved", notes=[f"internal estimator error: {exc!r}"])
         # https://github.com/bmsuisse/bicep-cost/issues/12
         missing = [i.meter.label() for i in est.items if i.quantity > 0 and i.meter and i.meter.account_price_missing]
-        if missing:
-            est = ResourceEstimate(res, "unresolved", notes=[f"no account price for {label}" for label in missing])
+        for label in dict.fromkeys(missing):
+            warning = f"{res.address}: no account price for {label}; using retail price"
+            est.notes.append(warning)
+            warnings.append(warning)
         if res.id in ctx.assumed_region:
             est.notes.append(f"location not known; priced in default region {default_region}")
         results.append(est)
@@ -53,14 +56,14 @@ def estimate_resources(
     return Estimate(
         price_source=(
             f"Account price sheet: {prices.price_sheet.source} (snapshot {prices.price_sheet.fetched_at}); "
-            "manual discounts ignored"
+            "retail fallback where needed; manual discounts ignored"
             if prices.price_sheet
             else "Azure Retail Prices API (list price, pay-as-you-go)"
         ),
         currency=prices.currency,
         region_default=default_region,
         resources=results,
-        warnings=[],
+        warnings=warnings,
         assumptions=[a.render() for a in usage.assumptions()],
         default_assumptions=sum(1 for a in usage.assumptions() if a.from_default),
     )

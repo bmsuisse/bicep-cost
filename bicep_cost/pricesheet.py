@@ -173,12 +173,12 @@ class PriceSheet:
                 os.unlink(temporary)
 
     def apply(self, meter: Meter) -> Meter:
-        """Replace retail rates, converting block units; missing account meters stay unpriced."""
+        """Replace matched account rates; retain retail rates for missing account meters."""
         tiers = self.rates.get((meter.meter_id.lower(), meter.sku_id.lower()))
         if tiers is None:
             tiers = self.rates.get((meter.meter_id.lower(), ""))
         if tiers is None:
-            return replace(meter, tiers=(), account_price_missing=True)
+            return replace(meter, account_price_missing=True)
         retail_scale, retail_unit = _unit(meter.unit)
         sheet_scale, sheet_unit = _unit(tiers[0].unit)
         if retail_unit != sheet_unit:

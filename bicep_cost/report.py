@@ -84,7 +84,7 @@ def to_json(est: Estimate, source: str, diagnostics: list[Diagnostic]) -> Estima
         "fixed_monthly": round(est.fixed, 6),
         "usage_monthly": round(est.usage, 6),
         "resources": resources,
-        "warnings": [f"{d.where}: {d.message}" if d.where else d.message for d in diagnostics],
+        "warnings": est.warnings + [f"{d.where}: {d.message}" if d.where else d.message for d in diagnostics],
         "assumptions": est.assumptions,
     }
 
@@ -227,6 +227,9 @@ def render_text(
     if external_res:
         out += ["", "Hosted outside this template (cost NOT included):"]
         out += [f"  > {r.resource.type} {r.resource.name}: {'; '.join(r.notes)}" for r in external_res]
+    if est.warnings:
+        out += ["", "Pricing warnings:"]
+        out += [f"  ! {warning}" for warning in est.warnings]
     if est.default_assumptions:
         out += [
             "",
@@ -276,6 +279,9 @@ def render_markdown(est: Estimate, source: str, diagnostics: list[Diagnostic]) -
         lines += ["", "**Not included:**"]
         lines += [f"- `{r.resource.type}` {r.resource.name}: {'; '.join(r.notes)}" for r in unresolved]
         lines += [f"- `{t}` (no estimator)" for t in sorted({r.resource.type for r in unsupported})]
+    if est.warnings:
+        lines += ["", "**Pricing warnings:**"]
+        lines += [f"- {warning}" for warning in est.warnings]
     lines += ["", f"_{est.price_source}; usage-based amounts use assumed consumption._", ""]
     return "\n".join(lines)
 
