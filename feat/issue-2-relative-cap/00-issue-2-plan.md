@@ -1,0 +1,5 @@
+Issue #2 — Allow relative cap
+
+Add --fail-increase-percent PERCENT to estimate and diff. Estimate takes a saved JSON --baseline report; require it when percentage cap is set. Diff uses its base input. Reuse one budget check for absolute and relative caps; either breach returns 3 after writing the full report. Preserve strict exit 2 precedence. Equality passes; decreases pass; zero-to-positive fails any finite relative cap, zero-to-zero passes. Require finite nonnegative thresholds and baseline totals; reject different currencies before output, without conversion. Compare Decimal representations of report precision to avoid binary rounding at equal thresholds. Document baseline capture and CI use. Test CLI relative/absolute combinations, equality, decreases, zero baseline, invalid inputs, currency mismatch, and output even on budget failure.
+
+Plan review (bms-plan-review, Python guidelines, ponytail): go. Existing CLI/report layers cover all work; no database or frontend. Existing report loader can validate baseline total/currency without changing report schema. Keep threshold evaluation shared, retain current report behavior, no new dependency.
