@@ -12,7 +12,7 @@ from .collect.collectors import Finding, collect_all
 from .collect.toml_out import render_usage_toml
 from .compile import CompileError, load_input
 from .engine import DeploymentSettings, Engine
-from .prices import PriceClient, PriceError, build_filter, default_cache_dir
+from .prices import PriceClient, PriceError, build_filter, default_cache_dir, normalize_currency
 from .report import EstimateJson, render_csv, render_diff, render_json, render_markdown, render_text
 from .usage import UsageConfig
 
@@ -185,19 +185,18 @@ def _cmd_estimate(args: argparse.Namespace) -> int:
     if usage_files:
         print("bicep-cost: usage from " + ", ".join(str(f) for f in usage_files), file=sys.stderr)
     usage = UsageConfig.load(usage_files)
-    currency = (args.currency or usage.cost_currency or "USD").upper()
+    currency = normalize_currency(args.currency or usage.cost_currency or "USD")
+    if usage.cost_currency and normalize_currency(usage.cost_currency) != currency:
+        raise ValueError(
+            f"usage file costs are in {usage.cost_currency}, but --currency is {currency}; "
+            "currency conversion is not supported"
+        )
     estimate = estimate_resources(
         engine.resources,
         _client(args, currency),
         usage,
         default_region=args.location.replace(" ", "").lower(),
     )
-    if usage.cost_currency and usage.cost_currency.upper() != currency:
-        print(
-            f"bicep-cost: warning: monthly_cost values in the usage file are {usage.cost_currency}, "
-            f"the estimate is in {currency}; they are not converted",
-            file=sys.stderr,
-        )
     source = compiled.source
     if args.format == "json":
         text = render_json(estimate, source, engine.diagnostics)

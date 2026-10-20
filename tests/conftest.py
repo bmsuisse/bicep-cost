@@ -230,7 +230,8 @@ _CLAUSE = re.compile(r"(contains\((\w+), '((?:[^']|'')*)'\))|((\w+) eq '((?:[^']
 
 
 def fake_fetcher(url: str) -> bytes:
-    flt = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)["$filter"][0]
+    qs = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+    flt = qs["$filter"][0]
     clauses = []
     for m in _CLAUSE.finditer(flt):
         if m.group(1):
@@ -245,7 +246,9 @@ def fake_fetcher(url: str) -> bytes:
             ok &= (actual == val) if op == "eq" else (val in actual)
         if ok:
             out.append(it)
-    return json.dumps({"Items": out, "NextPageLink": None}).encode()
+    return json.dumps(
+        {"Items": [{**row, "currencyCode": qs.get("currencyCode", ["USD"])[0]} for row in out], "NextPageLink": None}
+    ).encode()
 
 
 @pytest.fixture

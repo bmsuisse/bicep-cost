@@ -166,6 +166,14 @@ def _http_fetch(url: str) -> bytes:
     raise PriceError(f"Azure Retail Prices API request failed: {last}")
 
 
+def normalize_currency(value: str) -> str:
+    """Normalize an ISO currency code; Azure validates support for the requested code."""
+    currency = value.strip().upper()
+    if len(currency) != 3 or not currency.isascii() or not currency.isalpha():
+        raise PriceError("currency must be a three-letter code such as USD, CHF or EUR")
+    return currency
+
+
 def default_cache_dir() -> Path:
     base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
     return Path(base) / "bicep-cost"
@@ -181,6 +189,9 @@ class PriceClient:
     fetcher: Fetcher = _http_fetch
     queries_made: int = 0
     _memo: dict[str, tuple[Meter, ...]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.currency = normalize_currency(self.currency)
 
     def _cache_path(self, odata_filter: str) -> Path | None:
         if self.cache_dir is None:
@@ -270,6 +281,8 @@ def group_meters(items: Iterable[RawPriceItem], currency: str, now: datetime) ->
     for item in items:
         if item.get("type", "Consumption") != "Consumption":
             continue
+        if item.get("currencyCode", currency).upper() != currency:
+            raise PriceError(f"requested {currency} prices but Azure returned {item['currencyCode']}")
         start = _parse_date(item.get("effectiveStartDate"))
         if start is not None and start > now:
             continue
