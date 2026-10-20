@@ -35,6 +35,10 @@ def estimate_resources(
         except Exception as exc:  # an estimator bug must not hide the other resources
             log.debug("estimator failed for %s", res.address, exc_info=True)
             est = ResourceEstimate(res, "unresolved", notes=[f"internal estimator error: {exc!r}"])
+        # https://github.com/bmsuisse/bicep-cost/issues/12
+        missing = [i.meter.label() for i in est.items if i.quantity > 0 and i.meter and i.meter.account_price_missing]
+        if missing:
+            est = ResourceEstimate(res, "unresolved", notes=[f"no account price for {label}" for label in missing])
         if res.id in ctx.assumed_region:
             est.notes.append(f"location not known; priced in default region {default_region}")
         results.append(est)

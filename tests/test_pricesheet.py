@@ -29,7 +29,7 @@ def test_live_download_pagination_and_private_snapshot(tmp_path):
 
     sheet = PriceSheet.download("sub", transport)
     assert len(calls) == 2
-    assert "$expand=" in calls[0]
+    assert "api-version=2024-08-01" in calls[0]
     path = tmp_path / "prices.json"
     sheet.save(path)
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
@@ -68,7 +68,7 @@ def test_sheet_tiers_units_skus_and_missing_meter():
     assert special is not None
     assert special.unit_price == 0.4
     missing = Meter("absent", "s", "p", "k", "n", "r", "1 Hour", "CHF", ())
-    assert sheet.apply(missing) is None
+    assert sheet.apply(missing).account_price_missing
     with pytest.raises(NoPriceFound, match="incompatible"):
         sheet.apply(Meter("meter", "s", "p", "k", "n", "r", "1 GB", "CHF", ()))
 
@@ -138,3 +138,24 @@ def test_cli_live_save_and_load_account_prices(tmp_path, monkeypatch, capsys):
     report = json.loads(capsys.readouterr().out)
     assert report["total_monthly"] == 0
     assert any(r["status"] == "unresolved" for r in report["resources"])
+
+
+def test_partial_sheet_does_not_hide_storage_operations():
+    from bicep_cost.calc import estimate_resources
+    from bicep_cost.usage import UsageConfig
+    from tests.conftest import make_resource
+
+    storage = make_resource("Microsoft.Storage/storageAccounts", "store", {"sku": {"name": "Standard_LRS"}})
+    meter_id = "Storage|General Block Blob v2|Hot LRS|Hot LRS Data Stored|1 GB/Month|westeurope"
+    sheet = PriceSheet.from_rows([row(meterId=meter_id, currencyCode="USD", unitOfMeasure="1 GB/Month")], "partial")
+    prices = PriceClient(cache_dir=None, fetcher=fake_fetcher, price_sheet=sheet)
+    result = estimate_resources([storage], prices, UsageConfig())
+    assert result.resources[0].status == "unresolved"
+    assert any("Write Operations" in n for n in result.resources[0].notes)
+    assert result.monthly == 0
+    zero_ops = UsageConfig(
+        {"storage": {"write_operations_10k": 0, "read_operations_10k": 0, "other_operations_10k": 0}}
+    )
+    result = estimate_resources([storage], prices, zero_ops)
+    assert result.resources[0].status == "priced"
+    assert result.monthly == 200

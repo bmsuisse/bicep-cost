@@ -81,6 +81,7 @@ class Meter:
     tiers: tuple[Tier, ...]
     arm_sku: str = ""
     sku_id: str = ""
+    account_price_missing: bool = False
 
     @property
     def key(self) -> str:
@@ -245,7 +246,7 @@ class PriceClient:
         if self.price_sheet is not None:
             if self.price_sheet.currency != self.currency:
                 raise PriceError("account price sheet currency differs from requested currency")
-            meters = tuple(repriced for m in meters if (repriced := self.price_sheet.apply(m)) is not None)
+            meters = tuple(self.price_sheet.apply(m) for m in meters)
         self._memo[odata_filter] = meters
         return meters
 

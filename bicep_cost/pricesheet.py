@@ -101,7 +101,7 @@ class PriceSheet:
         """Download current subscription prices using an authenticated ARM transport."""
         sub = urllib.parse.quote(subscription_id, safe="")
         url = f"{ARM}/subscriptions/{sub}/providers/Microsoft.Consumption/pricesheets/default"
-        url += "?api-version=2024-08-01&$expand=properties/pricesheets/meterDetails"
+        url += "?api-version=2024-08-01"
         rows: list[dict[str, object]] = []
         seen: set[str] = set()
         while url:
@@ -172,13 +172,13 @@ class PriceSheet:
             if os.path.exists(temporary):
                 os.unlink(temporary)
 
-    def apply(self, meter: Meter) -> Meter | None:
+    def apply(self, meter: Meter) -> Meter:
         """Replace retail rates, converting block units; missing account meters stay unpriced."""
         tiers = self.rates.get((meter.meter_id.lower(), meter.sku_id.lower()))
         if tiers is None:
             tiers = self.rates.get((meter.meter_id.lower(), ""))
         if tiers is None:
-            return None
+            return replace(meter, tiers=(), account_price_missing=True)
         retail_scale, retail_unit = _unit(meter.unit)
         sheet_scale, sheet_unit = _unit(tiers[0].unit)
         if retail_unit != sheet_unit:
