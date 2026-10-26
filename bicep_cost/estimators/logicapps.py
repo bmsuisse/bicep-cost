@@ -133,6 +133,8 @@ def estimate_workflow(res: Resource, ctx: EstimateContext) -> ResourceEstimate:
     definition = res.get("properties.definition")
     if not isinstance(definition, dict):
         raise UnresolvedError(f"workflow definition of {res.name} is not known")
+    if res.is_unknown_at("properties.definition.actions") or res.is_unknown_at("properties.definition.triggers"):
+        raise UnresolvedError(f"actions or triggers of {res.name} are not known (depend on an unset parameter)")
     region = ctx.region(res)
     scope = f"sub:{res.subscription_id}"
     connections = _dict(_dict(_dict(res.get("properties.parameters")).get("$connections")).get("value"))

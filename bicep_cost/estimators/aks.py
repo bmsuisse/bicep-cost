@@ -5,7 +5,7 @@ import re
 from bicep_cost.armexpr import JsonValue
 from bicep_cost.context import HOURS_PER_MONTH, EstimateContext, UnresolvedError, as_number
 from bicep_cost.engine import Resource
-from bicep_cost.estimators.common import line, priced, usage_amount
+from bicep_cost.estimators.common import included, line, priced, usage_amount
 from bicep_cost.estimators.vm import default_os_disk_type, disk_item, vm_meter
 from bicep_cost.model import LineItem, ResourceEstimate
 
@@ -98,6 +98,8 @@ def estimate_cluster(res: Resource, ctx: EstimateContext) -> ResourceEstimate:
     if str(res.get("sku.name") or "").lower() == "automatic":
         items += usage_amount(res, ctx, "aks")
     else:
+        if res.is_unknown_at("properties.agentPoolProfiles"):
+            raise UnresolvedError(f"node pools of {res.name} are not known (depend on an unset parameter)")
         hybrid = _hybrid_benefit(res)
         pools = res.get("properties.agentPoolProfiles", [])
         for pool in pools if isinstance(pools, list) else []:
@@ -117,6 +119,15 @@ def estimate_cluster(res: Resource, ctx: EstimateContext) -> ResourceEstimate:
 def estimate_agent_pool(res: Resource, ctx: EstimateContext) -> ResourceEstimate:
     cluster = ctx.index.find(res.id.rsplit("/", 2)[0])
     region = ctx.region(cluster) if cluster is not None else ctx.region(res)
+    if cluster is not None:
+        inline = cluster.get("properties.agentPoolProfiles", [])
+        names = (
+            {str(p.get("name", "")).lower() for p in inline if isinstance(p, dict)}
+            if isinstance(inline, list)
+            else set()
+        )
+        if res.name.rsplit("/", 1)[-1].lower() in names:
+            return included(res, f"node pool is also defined inline on cluster {cluster.name} and priced there")
     hybrid = cluster is not None and _hybrid_benefit(cluster)
     items, notes = _pool_items(ctx, region, res.name, res.properties, hybrid_benefit=hybrid)
     return priced(res, items, notes)

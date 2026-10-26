@@ -2,7 +2,7 @@ from typing import Any
 
 import pytest
 
-from bicep_cost.armexpr import JsonValue
+from bicep_cost.armexpr import JsonValue, Unknown
 from bicep_cost.calc import estimate_resources
 from bicep_cost.engine import Resource
 from bicep_cost.model import Estimate, ResourceEstimate
@@ -257,3 +257,29 @@ def test_aks_default_os_disk_size_by_vcpu() -> None:
         512.0,
         1024.0,
     ]
+
+
+def test_aks_pool_declared_inline_and_as_child_is_priced_once(prices: PriceClient) -> None:
+    cluster = aks("Free", [pool("user", count=3)])
+    child = make_resource(
+        "Microsoft.ContainerService/managedClusters/agentPools", "aks/user", {"properties": pool("user", count=3)}
+    )
+    est = run(prices, [cluster, child])
+    assert one(est, "aks/user").status == "included"
+    assert est.monthly == pytest.approx(3 * 0.115 * HOURS)
+
+
+def test_unknown_pools_or_workflow_actions_are_unresolved_not_free(prices: PriceClient) -> None:
+    cluster = make_resource(
+        "Microsoft.ContainerService/managedClusters",
+        "aks",
+        {"location": "westeurope", "sku": {"tier": "Free"}, "properties": {"agentPoolProfiles": Unknown("param")}},
+    )
+    wf = make_resource(
+        "Microsoft.Logic/workflows",
+        "wf",
+        {"location": "westeurope", "properties": {"definition": {"triggers": {}, "actions": Unknown("param")}}},
+    )
+    est = run(prices, [cluster, wf])
+    assert one(est, "aks").status == "unresolved"
+    assert one(est, "wf").status == "unresolved"
