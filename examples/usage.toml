@@ -35,6 +35,22 @@ executions_per_month = 5000000
 avg_duration_ms = 800
 memory_mb = 512
 
+[logicapps."wf-sync"]            # Logic Apps Consumption workflow
+runs_per_month = 50000          # default: the Recurrence schedule, else 1000
+loop_iterations = 20            # iterations assumed for every For each / Until (default 10)
+# standard_actions_per_run = 4  # override the counted actions per run: builtin_ / standard_ / enterprise_actions_per_run
+data_retention_gb = 5           # run history storage
+
+[logicapps."wf-app"]            # Logic Apps Standard workflow app: managed connector calls (built-in operations are free)
+connector_actions_per_month = 2000000
+enterprise_connector_actions_per_month = 10000
+
+[aksnodepools."aks-prod/user"]  # "cluster/pool": typical node count when autoscaling
+nodes = 5
+
+[aks."aks-auto"]                # AKS Automatic provisions its nodes itself: enter what they cost
+monthly_cost = 400
+
 [appserviceplans."app-plan"]
 instances = 3                   # live instance count when autoscale / manual scaling differs from the template
 

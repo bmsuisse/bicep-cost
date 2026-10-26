@@ -80,7 +80,12 @@ def _is_windows(profile: dict[str, JsonValue]) -> bool:
     return False
 
 
-def _vm_meter(ctx: EstimateContext, region: str, size: str, windows: bool, spot: bool) -> Meter:
+def default_os_disk_type(size: str) -> str:
+    """Disk type assumed when a template leaves it out: Premium SSD for premium-storage capable sizes."""
+    return "Premium_LRS" if re.search(r"\d[a-z]*s(?:_|$)", size.lower()) else "StandardSSD_LRS"
+
+
+def vm_meter(ctx: EstimateContext, region: str, size: str, windows: bool, spot: bool) -> Meter:
     meters = ctx.meters("Virtual Machines", region, arm_sku=size)
 
     def kind(m: Meter) -> tuple[bool, bool, bool]:
@@ -121,7 +126,7 @@ def _vm_items(
     priced_windows = windows and license_type.lower() not in ("windows_server", "windows_client")
     spot = str(profile.get("priority") or "").lower() == "spot"
     hours = ctx.usage.number(section, res.name, "hours_per_month", HOURS_PER_MONTH)
-    meter = _vm_meter(ctx, region, size, priced_windows, spot)
+    meter = vm_meter(ctx, region, size, priced_windows, spot)
     os_label = "Windows" if priced_windows else "Linux" if not windows else "Windows (Hybrid Benefit)"
     items = [
         line(
@@ -152,7 +157,7 @@ def _vm_items(
             else:
                 account = managed.get("storageAccountType")
                 if not isinstance(account, str):
-                    account = "Premium_LRS" if re.search(r"\d[a-z]*s(?:_|$)", size.lower()) else "StandardSSD_LRS"
+                    account = default_os_disk_type(size)
                     notes.append(f"OS disk type not set; assumed {account}")
                 default = DEFAULT_OS_DISK_GB["windows" if windows else "linux"]
                 size_gb = as_number(os_disk.get("diskSizeGB"), default)
