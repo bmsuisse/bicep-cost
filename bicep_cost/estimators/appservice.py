@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from bicep_cost.context import HOURS_PER_MONTH, SECONDS_PER_MONTH, EstimateContext, UnresolvedError, as_number, need_str
 from bicep_cost.engine import Resource
+from bicep_cost.estimators import logicapps
 from bicep_cost.estimators.common import external, free, included, line, priced
 from bicep_cost.model import LineItem, ResourceEstimate
 
@@ -118,11 +119,15 @@ def estimate_site(res: Resource, ctx: EstimateContext) -> ResourceEstimate:
         if "functionapp" in kind:
             return external(res, note + " (a Consumption plan would add usage costs)")
         return external(res, note)
-    if "functionapp" not in kind:
+    if "functionapp" not in kind and "workflowapp" not in kind:
         return included(res, f"runs on plan {plan.name}")
     try:
         sku = parse_plan_sku(need_str(plan, "sku.name"))
     except UnresolvedError:
+        return included(res, f"runs on plan {plan.name}")
+    if "workflowapp" in kind and sku.kind == "logic-standard":
+        return logicapps.estimate_standard_app(res, ctx, plan)
+    if "functionapp" not in kind:
         return included(res, f"runs on plan {plan.name}")
     if sku.kind == "consumption":
         return _consumption_function(res, ctx)

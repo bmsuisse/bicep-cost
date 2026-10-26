@@ -4,7 +4,20 @@ from collections.abc import Callable
 
 from bicep_cost.context import EstimateContext
 from bicep_cost.engine import Resource
-from bicep_cost.estimators import aca, appservice, keyvault, monitor, network, postgres, servicebus, sql, storage, vm
+from bicep_cost.estimators import (
+    aca,
+    aks,
+    appservice,
+    keyvault,
+    logicapps,
+    monitor,
+    network,
+    postgres,
+    servicebus,
+    sql,
+    storage,
+    vm,
+)
 from bicep_cost.estimators.common import free
 from bicep_cost.model import ResourceEstimate
 
@@ -16,6 +29,10 @@ ESTIMATORS: dict[str, Estimator] = {
     "microsoft.app/managedenvironments": aca.estimate_environment,
     "microsoft.app/containerapps": aca.estimate_container_app,
     "microsoft.app/sessionpools": aca.estimate_session_pool,
+    "microsoft.containerservice/managedclusters": aks.estimate_cluster,
+    "microsoft.containerservice/managedclusters/agentpools": aks.estimate_agent_pool,
+    "microsoft.logic/workflows": logicapps.estimate_workflow,
+    "microsoft.logic/integrationaccounts": logicapps.estimate_integration_account,
     "microsoft.storage/storageaccounts": storage.estimate_account,
     "microsoft.storage/storageaccounts/fileservices/shares": storage.estimate_share,
     "microsoft.dbforpostgresql/flexibleservers": postgres.estimate_server,
@@ -71,6 +88,7 @@ FREE_TYPES: dict[str, str] = {
     "microsoft.compute/proximityplacementgroups": "placement groups are free",
     "microsoft.compute/sshpublickeys": "SSH keys are free",
     "microsoft.compute/diskencryptionsets": "disk encryption sets are free",
+    "microsoft.web/connections": "API connections are free; connector operations are billed on the logic app",
     "microsoft.devtestlab/schedules": "auto-shutdown schedules are free",
 }
 
@@ -81,6 +99,8 @@ FREE_PREFIXES: dict[str, str] = {
     "microsoft.servicebus/namespaces/": "queues, topics, subscriptions and rules are included in the namespace price",
     "microsoft.sql/servers/": "server settings are free; Defender for SQL is billed separately",
     "microsoft.sql/managedinstances/": "managed instance databases and settings are included in the instance price",
+    "microsoft.containerservice/managedclusters/": "maintenance configurations and extensions are free",
+    "microsoft.logic/integrationaccounts/": "partners, agreements, schemas and maps are included in the account price",
     "microsoft.compute/virtualmachines/": "VM extensions are free",
     "microsoft.compute/virtualmachinescalesets/": "scale set extensions are free",
 }

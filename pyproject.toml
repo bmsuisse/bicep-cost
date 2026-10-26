@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bicep-cost"
-version = "0.1.1"
+version = "0.2.0"
 description = "Estimate monthly Azure costs from Bicep / ARM templates using the public Azure Retail Prices API"
 readme = "README.md"
 license = "MIT"
