@@ -283,3 +283,66 @@ def test_unknown_pools_or_workflow_actions_are_unresolved_not_free(prices: Price
     est = run(prices, [cluster, wf])
     assert one(est, "aks").status == "unresolved"
     assert one(est, "wf").status == "unresolved"
+
+
+def test_unknown_nested_actions_pool_entries_and_tier_are_unresolved(prices: PriceClient) -> None:
+    wf = workflow(actions={"scope": {"type": "Scope", "actions": Unknown("param")}})
+    pools = make_resource(
+        "Microsoft.ContainerService/managedClusters",
+        "pools",
+        {"location": "westeurope", "sku": {"tier": "Free"}, "properties": {"agentPoolProfiles": [Unknown("p")]}},
+    )
+    tier = make_resource(
+        "Microsoft.ContainerService/managedClusters",
+        "tier",
+        {"location": "westeurope", "sku": {"tier": Unknown("p")}, "properties": {"agentPoolProfiles": []}},
+    )
+    est = run(prices, [wf, pools, tier])
+    assert [one(est, n).status for n in ("wf", "pools", "tier")] == ["unresolved"] * 3
+
+
+def test_unknown_values_that_change_the_price_are_unresolved(prices: PriceClient) -> None:
+    def wf_with(**props: Any) -> Resource:
+        return make_resource("Microsoft.Logic/workflows", "w", {"location": "westeurope", "properties": props})
+
+    definition: dict[str, Any] = {"triggers": {}, "actions": {}}
+    cases = [
+        wf_with(state=Unknown("p"), definition=definition),
+        wf_with(definition={"triggers": {}, "actions": {"a": Unknown("p")}}),
+        wf_with(
+            definition={
+                "triggers": {
+                    "r": {"type": "Recurrence", "recurrence": {"frequency": "Minute", "interval": Unknown("p")}}
+                },
+                "actions": {},
+            }
+        ),
+        make_resource(
+            "Microsoft.ContainerService/managedClusters",
+            "c",
+            {
+                "location": "westeurope",
+                "sku": {"tier": "Free"},
+                "properties": {
+                    "agentPoolProfiles": [{"name": "p", "vmSize": "Standard_D2s_v5", "count": Unknown("p")}]
+                },
+            },
+        ),
+        make_resource(
+            "Microsoft.ContainerService/managedClusters",
+            "c",
+            {"location": "westeurope", "sku": {"name": Unknown("p")}, "properties": {}},
+        ),
+    ]
+    assert [run(prices, [c]).resources[0].status for c in cases] == ["unresolved"] * len(cases)
+
+
+def test_recurrence_schedule_multiplies_the_rate(prices: PriceClient) -> None:
+    def runs(recurrence: dict[str, Any]) -> float:
+        wf = workflow(triggers={"r": {"type": "Recurrence", "recurrence": recurrence}})
+        return run(prices, [wf]).resources[0].items[0].quantity
+
+    assert runs({"frequency": "Hour", "interval": 1, "schedule": {"minutes": [0, 15, 30, 45]}}) == pytest.approx(
+        4 * HOURS
+    )
+    assert runs({"frequency": "Month", "interval": 1, "schedule": {"monthDays": [1, 15]}}) == pytest.approx(2)

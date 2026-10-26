@@ -2,7 +2,7 @@
 
 import re
 
-from bicep_cost.armexpr import JsonValue
+from bicep_cost.armexpr import JsonValue, Unknown
 from bicep_cost.context import HOURS_PER_MONTH, EstimateContext, UnresolvedError, as_number
 from bicep_cost.engine import Resource
 from bicep_cost.estimators.common import included, line, priced, usage_amount
@@ -20,6 +20,8 @@ def default_os_disk_gb(vm_size: str) -> float:
 
 
 def _control_plane(res: Resource, ctx: EstimateContext, region: str) -> tuple[list[LineItem], list[str]]:
+    if res.is_unknown_at("sku.name"):
+        raise UnresolvedError(f"SKU of {res.name} is not known (depends on an unset parameter)")
     if str(res.get("sku.name") or "Base").lower() == "automatic":
         meter = ctx.meter(
             "Azure Kubernetes Service",
@@ -31,6 +33,8 @@ def _control_plane(res: Resource, ctx: EstimateContext, region: str) -> tuple[li
         return [line("AKS Automatic hosted control plane", meter, HOURS_PER_MONTH)], [
             "AKS Automatic provisions and bills its nodes itself; set [aks.<name>] monthly_cost for that compute"
         ]
+    if res.is_unknown_at("sku.tier"):
+        raise UnresolvedError(f"tier of {res.name} is not known (depends on an unset parameter)")
     tier = str(res.get("sku.tier") or "Free").lower()
     if tier == "free":
         return [], ["Free tier: no cluster management fee (no financially backed uptime SLA)"]
@@ -49,6 +53,9 @@ def _pool_items(
     size = pool.get("vmSize")
     if not isinstance(size, str):
         raise UnresolvedError(f"VM size of node pool {label} is not known")
+    for key in ("count", "minCount", "osType", "scaleSetPriority", "osDiskType", "osDiskSizeGB", "enableAutoScaling"):
+        if isinstance(pool.get(key), Unknown):
+            raise UnresolvedError(f"{key} of node pool {label} is not known (depends on an unset parameter)")
     notes: list[str] = []
     autoscale = pool.get("enableAutoScaling") is True
     explicit = ctx.usage.optional_number("aksnodepools", label, "nodes")
@@ -103,6 +110,8 @@ def estimate_cluster(res: Resource, ctx: EstimateContext) -> ResourceEstimate:
         hybrid = _hybrid_benefit(res)
         pools = res.get("properties.agentPoolProfiles", [])
         for pool in pools if isinstance(pools, list) else []:
+            if isinstance(pool, Unknown):
+                raise UnresolvedError(f"a node pool of {res.name} is not known (depends on an unset parameter)")
             if isinstance(pool, dict):
                 pool_items, pool_notes = _pool_items(
                     ctx, region, f"{res.name}/{pool.get('name')}", pool, hybrid_benefit=hybrid

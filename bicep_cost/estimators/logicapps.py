@@ -9,7 +9,7 @@ month are free. Logic Apps Standard (workflow apps) is billed through its plan, 
 import re
 from dataclasses import dataclass
 
-from bicep_cost.armexpr import JsonValue
+from bicep_cost.armexpr import JsonValue, Unknown
 from bicep_cost.context import HOURS_PER_MONTH, EstimateContext, UnresolvedError, as_number
 from bicep_cost.engine import Resource
 from bicep_cost.estimators.common import external, free, included, line, priced
@@ -76,11 +76,19 @@ def _classify(node: dict[str, JsonValue], connections: dict[str, JsonValue]) -> 
     return "standard"
 
 
+def _actions_of(container: JsonValue) -> dict[str, JsonValue]:
+    if isinstance(container, Unknown):
+        raise UnresolvedError("nested workflow actions are not known (depend on an unset parameter)")
+    value = _dict(container).get("actions")
+    if isinstance(value, Unknown):
+        raise UnresolvedError("nested workflow actions are not known (depend on an unset parameter)")
+    return _dict(value)
+
+
 def _child_action_maps(node: dict[str, JsonValue]) -> list[dict[str, JsonValue]]:
     """Every nested ``actions`` map of a control action (scope, loops, condition branches, switch cases)."""
-    nested = [_dict(node.get("actions")), _dict(_dict(node.get("else")).get("actions"))]
-    nested.append(_dict(_dict(node.get("default")).get("actions")))
-    nested.extend(_dict(_dict(case).get("actions")) for case in _dict(node.get("cases")).values())
+    nested = [_actions_of(node), _actions_of(node.get("else")), _actions_of(node.get("default"))]
+    nested.extend(_actions_of(case) for case in _dict(node.get("cases")).values())
     return [m for m in nested if m]
 
 
@@ -92,6 +100,8 @@ def _count_actions(
     counts: OperationCounts,
 ) -> None:
     for raw in actions.values():
+        if isinstance(raw, Unknown):
+            raise UnresolvedError("a workflow action is not known (depends on an unset parameter)")
         node = _dict(raw)
         counts.add(_classify(node, connections), multiplier)
         is_loop = str(node.get("type", "")).lower() in LOOP_TYPES
@@ -108,14 +118,16 @@ def _polls_per_month(recurrence: dict[str, JsonValue]) -> float | None:
     polls = HOURS_PER_MONTH / (unit * interval)
     schedule = _dict(recurrence.get("schedule"))
     frequency = str(recurrence.get("frequency", "")).lower()
-    if frequency in ("day", "week"):
-        hours, minutes = schedule.get("hours"), schedule.get("minutes")
-        polls *= (len(hours) if isinstance(hours, list) and hours else 1) * (
-            len(minutes) if isinstance(minutes, list) and minutes else 1
-        )
-    if frequency == "week":
-        week_days = schedule.get("weekDays")
-        polls *= len(week_days) if isinstance(week_days, list) and week_days else 1
+    # schedule entries multiply the base rate: minutes for hourly and coarser, hours for daily and coarser, ...
+    keys = {
+        "hour": ("minutes",),
+        "day": ("hours", "minutes"),
+        "week": ("hours", "minutes", "weekDays"),
+        "month": ("hours", "minutes", "monthDays"),
+    }.get(frequency, ())
+    for key in keys:
+        entries = schedule.get(key)
+        polls *= len(entries) if isinstance(entries, list) and entries else 1
     return polls
 
 
@@ -126,6 +138,8 @@ def _recount(definition: dict[str, JsonValue], connections: dict[str, JsonValue]
 
 
 def estimate_workflow(res: Resource, ctx: EstimateContext) -> ResourceEstimate:
+    if res.is_unknown_at("properties.state"):
+        raise UnresolvedError(f"state of {res.name} is not known (depends on an unset parameter)")
     if str(res.get("properties.state") or "Enabled").lower() == "disabled":
         return free(res, "disabled workflows are not billed")
     if res.properties.get("integrationServiceEnvironment") is not None:
@@ -153,6 +167,8 @@ def estimate_workflow(res: Resource, ctx: EstimateContext) -> ResourceEstimate:
         kind = _classify(trigger, connections)
         recurrence = _dict(trigger.get("recurrence"))
         per_month = _polls_per_month(recurrence) if recurrence else None
+        if recurrence and per_month is None:
+            raise UnresolvedError(f"recurrence of trigger in {res.name} is not known (depends on an unset parameter)")
         polls.add(kind, per_month or 0.0)
         if str(trigger.get("type", "")).lower() in SCHEDULE_TRIGGERS and per_month is not None:
             scheduled_runs = (scheduled_runs or 0.0) + per_month
