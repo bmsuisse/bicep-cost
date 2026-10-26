@@ -1,5 +1,7 @@
 """Azure Kubernetes Service: cluster management fee (tier) and the VMs behind each node pool."""
 
+import re
+
 from bicep_cost.armexpr import JsonValue
 from bicep_cost.context import HOURS_PER_MONTH, EstimateContext, UnresolvedError, as_number
 from bicep_cost.engine import Resource
@@ -7,7 +9,14 @@ from bicep_cost.estimators.common import line, priced, usage_amount
 from bicep_cost.estimators.vm import default_os_disk_type, disk_item, vm_meter
 from bicep_cost.model import LineItem, ResourceEstimate
 
-DEFAULT_OS_DISK_GB = 128.0
+# AKS sizes a managed OS disk it is not told the size of by the node's vCPU count (P10 / P15 / P20 / P30).
+DEFAULT_OS_DISK_GB = ((8, 128.0), (16, 256.0), (64, 512.0), (float("inf"), 1024.0))
+
+
+def default_os_disk_gb(vm_size: str) -> float:
+    match = re.match(r"standard_[a-z]+(\d+)", vm_size.lower())
+    vcpus = int(match.group(1)) if match else 1
+    return next(gb for limit, gb in DEFAULT_OS_DISK_GB if vcpus < limit)
 
 
 def _control_plane(res: Resource, ctx: EstimateContext, region: str) -> tuple[list[LineItem], list[str]]:
@@ -67,13 +76,20 @@ def _pool_items(
         notes.append(f"node pool {label}: ephemeral OS disk, no disk charge")
     else:
         if not pool.get("osDiskType"):
-            notes.append(f"node pool {label}: OS disk type not set; assumed a managed disk")
+            notes.append(
+                f"node pool {label}: OS disk type not set; priced as a managed disk (AKS uses a free ephemeral disk "
+                "when the VM's temp storage is large enough: set osDiskType to Ephemeral)"
+            )
         size_gb = as_number(pool.get("osDiskSizeGB"), 0.0)
         if size_gb <= 0:
-            size_gb = DEFAULT_OS_DISK_GB
+            size_gb = default_os_disk_gb(size)
             notes.append(f"node pool {label}: OS disk size not set; assumed {size_gb:g} GB")
         items.append(disk_item(ctx, region, f"{label} OS disk", default_os_disk_type(size), size_gb, nodes))
     return items, notes
+
+
+def _hybrid_benefit(cluster: Resource) -> bool:
+    return str(cluster.get("properties.windowsProfile.licenseType") or "").lower() == "windows_server"
 
 
 def estimate_cluster(res: Resource, ctx: EstimateContext) -> ResourceEstimate:
@@ -82,7 +98,7 @@ def estimate_cluster(res: Resource, ctx: EstimateContext) -> ResourceEstimate:
     if str(res.get("sku.name") or "").lower() == "automatic":
         items += usage_amount(res, ctx, "aks")
     else:
-        hybrid = str(res.get("properties.windowsProfile.licenseType") or "").lower() == "windows_server"
+        hybrid = _hybrid_benefit(res)
         pools = res.get("properties.agentPoolProfiles", [])
         for pool in pools if isinstance(pools, list) else []:
             if isinstance(pool, dict):
@@ -101,5 +117,6 @@ def estimate_cluster(res: Resource, ctx: EstimateContext) -> ResourceEstimate:
 def estimate_agent_pool(res: Resource, ctx: EstimateContext) -> ResourceEstimate:
     cluster = ctx.index.find(res.id.rsplit("/", 2)[0])
     region = ctx.region(cluster) if cluster is not None else ctx.region(res)
-    items, notes = _pool_items(ctx, region, res.name, res.properties, hybrid_benefit=False)
+    hybrid = cluster is not None and _hybrid_benefit(cluster)
+    items, notes = _pool_items(ctx, region, res.name, res.properties, hybrid_benefit=hybrid)
     return priced(res, items, notes)

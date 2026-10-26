@@ -16,6 +16,7 @@ from bicep_cost.estimators.common import external, free, included, line, priced
 from bicep_cost.model import CostBasis, LineItem, ResourceEstimate
 
 ENTERPRISE_CONNECTORS = frozenset({"sap", "mq", "ibmmq", "ibm3270", "3270"})
+SCHEDULE_TRIGGERS = frozenset({"recurrence", "slidingwindow"})
 CONNECTOR_TYPES = frozenset({"apiconnection", "apiconnectionwebhook", "apiconnectionnotification"})
 LOOP_TYPES = frozenset({"foreach", "until"})
 HOURS_PER_UNIT = {
@@ -143,23 +144,27 @@ def estimate_workflow(res: Resource, ctx: EstimateContext) -> ResourceEstimate:
         actions = _recount(definition, connections, iterations)
 
     polls = OperationCounts()  # trigger executions that follow from the template's recurrence
-    pushes = OperationCounts()  # event-driven trigger executions, one per run
+    events = OperationCounts()  # event-driven trigger executions, set from the number of runs below
     scheduled_runs: float | None = None
+    event_triggers: list[tuple[str, float]] = []  # (class, polls per month); None polls = pure push trigger
     for trigger in (_dict(v) for v in _dict(definition.get("triggers")).values()):
+        kind = _classify(trigger, connections)
         recurrence = _dict(trigger.get("recurrence"))
         per_month = _polls_per_month(recurrence) if recurrence else None
-        if per_month is None:
-            pushes.add(_classify(trigger, connections), 1.0)
-            continue
-        polls.add(_classify(trigger, connections), per_month)
-        if str(trigger.get("type", "")).lower() == "recurrence":
+        polls.add(kind, per_month or 0.0)
+        if str(trigger.get("type", "")).lower() in SCHEDULE_TRIGGERS and per_month is not None:
             scheduled_runs = (scheduled_runs or 0.0) + per_month
+        else:
+            event_triggers.append((kind, per_month or 0.0))
     runs = ctx.usage.number(
         "logicapps",
         res.name,
         "runs_per_month",
         scheduled_runs if scheduled_runs is not None else DEFAULT_TRIGGERS_PER_MONTH,
     )
+    for kind, per_month in event_triggers:
+        # a polling connector trigger fires once per waiting event, on top of the polls that find nothing
+        events.add(kind, max(runs - per_month, 0.0))
     run_basis: CostBasis = (
         "fixed"
         if scheduled_runs is not None and not ctx.usage.has("logicapps", res.name, "runs_per_month")
@@ -172,7 +177,7 @@ def estimate_workflow(res: Resource, ctx: EstimateContext) -> ResourceEstimate:
         per_run = ctx.usage.number("logicapps", res.name, f"{kind}_actions_per_run", getattr(actions, kind))
         for quantity, basis, what in (
             (getattr(polls, kind), "fixed", "trigger polls"),
-            (getattr(pushes, kind) * runs, "usage", "trigger events"),
+            (getattr(events, kind), "usage", "trigger events"),
             (per_run * runs, run_basis, "actions"),
         ):
             if quantity <= 0:

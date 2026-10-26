@@ -213,3 +213,47 @@ def test_aks_standalone_agent_pool_and_unknown_size(prices: PriceClient) -> None
 def test_aks_automatic_prices_the_hosted_control_plane(prices: PriceClient) -> None:
     est = run(prices, [aks("Standard", [pool()], sku_name="Automatic")], {"aks": {"aks": {"monthly_cost": 200}}})
     assert est.monthly == pytest.approx(0.16 * HOURS + 200)
+
+
+def test_logic_app_sliding_window_counts_as_schedule(prices: PriceClient) -> None:
+    wf = workflow(
+        triggers={"w": {"type": "SlidingWindow", "recurrence": {"frequency": "Hour", "interval": 1}}},
+        actions={"a": {"type": "Compose"}},
+    )
+    assert run(prices, [wf]).monthly == 0  # 1,460 operations, inside the free built-in grant
+    wf = workflow(
+        triggers={"w": {"type": "SlidingWindow", "recurrence": {"frequency": "Minute", "interval": 1}}},
+        actions={"a": {"type": "Compose"}},
+    )
+    assert run(prices, [wf]).monthly == pytest.approx((2 * HOURS * 60 - 4000) * 2.5e-5)
+
+
+def test_logic_app_polling_connector_trigger_fires_per_event(prices: PriceClient) -> None:
+    trigger = connector("servicebus")
+    trigger["recurrence"] = {"frequency": "Day", "interval": 1}
+    wf = workflow(triggers={"sb": trigger})
+    est = run(prices, [wf], {"logicapps": {"wf": {"runs_per_month": 100_000}}})
+    assert est.monthly == pytest.approx(100_000 * 0.000125)  # not just 30 polls
+
+
+def test_aks_child_pool_inherits_hybrid_benefit_and_default_disk_follows_vcpus(prices: PriceClient) -> None:
+    cluster = aks("Free", windowsProfile={"licenseType": "Windows_Server"})
+    win = make_resource(
+        "Microsoft.ContainerService/managedClusters/agentPools",
+        "aks/win",
+        {"properties": {"vmSize": "Standard_D2s_v5", "count": 1, "osType": "Windows", "osDiskType": "Ephemeral"}},
+    )
+    assert one(run(prices, [cluster, win]), "aks/win").monthly == pytest.approx(0.115 * HOURS)  # Linux rate
+
+
+def test_aks_default_os_disk_size_by_vcpu() -> None:
+    from bicep_cost.estimators.aks import default_os_disk_gb
+
+    assert [
+        default_os_disk_gb(s) for s in ("Standard_D2s_v5", "Standard_D8s_v5", "Standard_E16ds_v5", "Standard_M64s")
+    ] == [
+        128.0,
+        256.0,
+        512.0,
+        1024.0,
+    ]
