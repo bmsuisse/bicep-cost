@@ -194,8 +194,10 @@ def _plan_candidates(
         low = "low: the plan's workers restart while it scales (a short disruption); check memory-heavy apps afterwards"
         if i > 0:
             down.append(sku_candidate(rungs[i - 1], rungs[i], low))
-        if i + 1 < len(rungs):
-            up.append(sku_candidate(rungs[i + 1], rungs[i], "low: the plan's workers restart while it scales"))
+        up += [
+            sku_candidate(rungs[j], rungs[i], "low: the plan's workers restart while it scales")
+            for j in range(i + 1, len(rungs))
+        ]
     smallest = 2 if zone_redundant else 1
     if instances - 1 >= smallest and instances >= 2:
         ratio = instances / (instances - 1)
@@ -598,7 +600,7 @@ def _aca_candidates(
 
     i = ACA_CPUS.index(cpu)
     down = [size(ACA_CPUS[i - 1])] if i > 0 else []
-    up = [size(ACA_CPUS[i + 1])] if i + 1 < len(ACA_CPUS) else []
+    up = [size(c) for c in ACA_CPUS[i + 1 :]]
     smallest = 2 if _aca_zone_redundant(res, env) else 1
     if min_r - 1 >= smallest and min_r >= 2 and observed_max <= min_r:
         ratio = min_r / (min_r - 1)
