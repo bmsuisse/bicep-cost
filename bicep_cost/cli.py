@@ -20,6 +20,12 @@ from bicep_cost.existing import load_existing, merge_existing
 from bicep_cost.prices import PriceClient, PriceError, build_filter, default_cache_dir, normalize_currency
 from bicep_cost.pricesheet import PriceSheet
 from bicep_cost.report import EstimateJson, render_csv, render_diff, render_json, render_markdown, render_text
+from bicep_cost.rightsize import MIN_DAYS
+from bicep_cost.rightsize_report import render_json as render_rightsize_json
+from bicep_cost.rightsize_report import render_markdown as render_rightsize_markdown
+from bicep_cost.rightsize_report import render_text as render_rightsize_text
+from bicep_cost.rightsize_report import select
+from bicep_cost.rightsize_run import analyse
 from bicep_cost.scan import (
     add_coverage_json,
     ambiguous_ids,
@@ -42,6 +48,16 @@ def _positive_int(text: str) -> int:
     value = int(text)
     if value <= 0:
         raise argparse.ArgumentTypeError("must be a positive number of days")
+    return value
+
+
+MAX_RIGHTSIZE_DAYS = 90  # Azure Monitor keeps platform metrics for 93 days
+
+
+def _rightsize_days(text: str) -> int:
+    value = int(text)
+    if not MIN_DAYS <= value <= MAX_RIGHTSIZE_DAYS:
+        raise argparse.ArgumentTypeError(f"must be between {MIN_DAYS} and {MAX_RIGHTSIZE_DAYS} days")
     return value
 
 
@@ -262,6 +278,47 @@ def build_parser() -> argparse.ArgumentParser:
     )
     spikes.add_argument("--cost-type", default="ActualCost", choices=["ActualCost", "AmortizedCost"])
     spikes.add_argument("--json", action="store_true", help="machine-readable output")
+
+    rightsize = sub.add_parser(
+        "rightsize",
+        help="find over- and under-provisioned resources from real Azure Monitor data and propose a change when sure",
+        description="Read-only: lists the resources with Azure Resource Graph, reads hourly Azure Monitor metrics "
+        "(p95 of the hourly maxima, max, mean, data coverage) and Azure Advisor recommendations, and gives every "
+        "App Service plan, PostgreSQL flexible server, Azure SQL database and Container App one verdict: over, "
+        "under, watch, ok or no-data. A proposal (target size, monthly saving or increase, risk, rollback) is only "
+        "made when the data is complete and unambiguous. Needs `az login` with Reader and Monitoring Reader on the "
+        "resources (Advisor read for the second opinion). Nothing is ever changed in Azure.",
+    )
+    rightsize.add_argument("--subscription-id", help="default: the az CLI's current subscription")
+    rightsize.add_argument(
+        "--resource-group", action="append", default=[], metavar="NAME", help="only this resource group; repeatable"
+    )
+    rightsize.add_argument(
+        "--days",
+        type=_rightsize_days,
+        default=30,
+        help=f"metric window in days, {MIN_DAYS}..{MAX_RIGHTSIZE_DAYS} (default 30; shorter windows cannot prove "
+        "`over` because of monthly cycles)",
+    )
+    rightsize.add_argument("--currency", default=None, help="price currency (default: the price sheet's, else USD)")
+    rightsize.add_argument("--format", choices=["text", "markdown", "json"], default="text")
+    rightsize.add_argument("--only", choices=["over", "under"], help="show only resources with this verdict")
+    rightsize.add_argument(
+        "--min-saving",
+        type=_nonnegative_number,
+        default=0.0,
+        metavar="AMOUNT",
+        help="hide `over` proposals saving less than AMOUNT per month",
+    )
+    rightsize.add_argument("--detail", action="store_true", help="text format: also show the metrics of `ok` resources")
+    rightsize.add_argument("--workers", type=_positive_int, default=4, help="parallel metric calls (default 4)")
+    rightsize.add_argument("--fail-on", choices=["over", "under"], help="exit with 3 if any resource has this verdict")
+    rightsize.add_argument("-o", "--output", type=Path, help="write the report to a file instead of stdout")
+    rs_account = rightsize.add_mutually_exclusive_group()
+    rs_account.add_argument("--azure-prices", action="store_true", help="use the subscription's price sheet")
+    rs_account.add_argument("--price-sheet", type=Path, help="saved account price sheet JSON or Azure CSV")
+    rightsize.add_argument("--save-price-sheet", type=Path, help="save the sheet fetched with --azure-prices")
+    _add_cache_args(rightsize)
 
     init = sub.add_parser(
         "init-usage", help="write a usage file listing every tunable value of a template with its default"
@@ -564,6 +621,42 @@ def _cmd_spikes(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_rightsize(args: argparse.Namespace) -> int:
+    subscription = args.subscription_id or az_current_subscription()
+    sheet = _load_price_sheet(args, subscription)
+    currency = normalize_currency(args.currency or (sheet.currency if sheet else "USD"))
+    if sheet and sheet.currency != currency:
+        raise ValueError(
+            f"account price sheet is in {sheet.currency}, prices are requested in {currency}; no conversion supported"
+        )
+    client = _client(args, currency)
+    client.price_sheet = sheet
+    now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    arm = ArmClient(http_transport(throttle_waits=RETRY_WAITS), days=args.days, now=now)
+    print(
+        f"bicep-cost: reading hourly metrics of subscription {subscription} over {args.days} days ...", file=sys.stderr
+    )
+    report = analyse(arm, client, subscription, tuple(args.resource_group), workers=args.workers)
+    report.price_source = (
+        f"account price sheet {sheet.source}" if sheet else "Azure Retail Prices API list price, pay-as-you-go"
+    )
+    selection = select(report, args.only, args.min_saving)
+    if args.format == "json":
+        text = render_rightsize_json(report, selection)
+    elif args.format == "markdown":
+        text = render_rightsize_markdown(report, selection)
+    else:
+        text = render_rightsize_text(report, selection, args.detail)
+    if args.output:
+        args.output.write_text(text)
+    else:
+        sys.stdout.write(text)
+    if args.fail_on and any(a.verdict == args.fail_on for a in report.assessments):
+        print(f"bicep-cost: resources with verdict {args.fail_on} found (--fail-on)", file=sys.stderr)
+        return 3
+    return 0
+
+
 def _cmd_init_usage(args: argparse.Namespace) -> int:
     engine, source = _expand(args, "00000000-0000-0000-0000-000000000000", "rg-estimate")
     usage = UsageConfig()
@@ -623,6 +716,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_scan(args)
         if args.command == "spikes":
             return _cmd_spikes(args)
+        if args.command == "rightsize":
+            return _cmd_rightsize(args)
         if args.command == "init-usage":
             return _cmd_init_usage(args)
         return _cmd_prices(args)
