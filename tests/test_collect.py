@@ -319,6 +319,23 @@ def test_collect_writes_usage_file_next_to_template_and_estimate_picks_it_up(
     assert any("365 active h" in i["description"] for i in app["items"])
 
 
+def test_collect_measures_existing_resources_from_the_existing_file(
+    project: tuple[Path, FakeAzure], tmp_path: Path
+) -> None:
+    path, azure = project
+    plan = {"type": "Microsoft.Web/serverfarms", "name": "shared", "sku": {"name": "P1v3", "capacity": 2}}
+    existing = tmp_path / "existing.json"
+    existing.write_text(json.dumps([plan]))
+    azure.on(
+        "resourceGroups/my-rg/providers/Microsoft.Web/serverfarms/shared", {"sku": {"name": "P1v3", "capacity": 3}}
+    )
+    args = ["collect", str(path / "main.json"), "--resource-group", "my-rg", "--existing", str(existing)]
+    assert cli.main(args) == 0
+    text = (path / "main.usage.toml").read_text()
+    assert tomllib.loads(text)["appserviceplans"]["shared"]["instances"] == 3
+    assert "DRIFT instances: template 2, live 3" in text
+
+
 def test_estimate_discovers_usage_files_and_reports_them(
     project: tuple[Path, FakeAzure], capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -1,0 +1,27 @@
+{
+  "resources": [
+    {
+      "type": "Microsoft.Web/serverfarms",
+      "name": "shared-plan",
+      "location": "westeurope",
+      "kind": "linux",
+      "sku": {"name": "P1v3", "capacity": 2},
+      "properties": {"reserved": true}
+    },
+    {
+      "type": "Microsoft.DBforPostgreSQL/flexibleServers",
+      "name": "shared-postgres",
+      "resourceGroup": "rg-platform",
+      "location": "westeurope",
+      "sku": {"name": "Standard_D2ds_v5", "tier": "GeneralPurpose"},
+      "properties": {"storage": {"storageSizeGB": 128}}
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces",
+      "name": "shared-logs",
+      "resourceGroup": "rg-platform",
+      "location": "westeurope",
+      "properties": {"sku": {"name": "PerGB2018"}}
+    }
+  ]
+}

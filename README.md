@@ -84,6 +84,26 @@ can be lower than what is billed; Container Apps free grants are subscription-wi
 subscription use them up, the estimate understates; `monthly_cost` values are in the billing currency recorded as
 `[meta] cost_currency` (the estimate then defaults to that currency, no conversion happens).
 
+### Resources the template only references
+
+A template that just *references* platform-owned resources (`resource plan '...' existing = {...}`: App Service plan,
+database, Log Analytics, ...) deploys none of them, so they cost nothing in the estimate and a budget cap guards
+nothing. Describe them in a JSON file and pass it with `--existing`:
+
+```bash
+bicep-cost estimate main.bicep -p parameters/prod.bicepparam --existing infra/existing.json
+bicep-cost collect  main.bicep -p parameters/prod.bicepparam --existing infra/existing.json --resource-group <rg>
+```
+
+The file is a list (or `{"resources": [...]}`) of resources with the same fields as in an ARM template - `type`, `name`,
+`location`, `kind`, `sku`, `properties` - see [`examples/existing.json`](examples/existing.json). They are priced by the
+estimator of their type and take usage values like any other resource (`collect` measures them and reports drift
+against the file). `resourceGroup` / `subscriptionId` default to the deployment's, so `plan.id` in the template
+matches the entry; set them for resources living elsewhere. Sites and slots then run on the listed plan instead of
+being reported as *external*. The option is repeatable (later files win), and a resource the template deploys itself
+always takes precedence over an entry for the same id. Use only the properties an estimator reads (SKU, capacity,
+storage size, ...); there is no need to dump the full resource.
+
 ### Negotiated discounts
 
 List prices are what the API returns. If you pay less (EA/MCA discounts, reservations), say so per resource type:
@@ -134,7 +154,7 @@ bicep-cost prices --service "Azure Container Apps" --meter-contains Idle   # bro
 bicep-cost spikes                                      # Azure cost spikes of the last days (needs az login)
 ```
 
-Other options: `--location` (default region and `resourceGroup().location`, default `westeurope`), `--resource-group`,
+Other options: `--existing FILE.json` (price referenced `existing` resources), `--location` (default region and `resourceGroup().location`, default `westeurope`), `--resource-group`,
 `--subscription-id`, `--offline` / `--refresh` / `--no-cache`, `-v` (log API calls).
 
 ## Find cost spikes
