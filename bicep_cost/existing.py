@@ -21,7 +21,7 @@ from pathlib import Path
 from bicep_cost.armexpr import JsonValue, build_resource_id
 from bicep_cost.engine import Resource
 
-MODULE_PATH = ("existing",)
+MODULE_PREFIX = "existing"
 
 
 class ExistingError(ValueError):
@@ -73,25 +73,40 @@ def _resource(path: Path, index: int, entry: JsonValue, subscription_id: str, re
     rid = build_resource_id(f"/subscriptions/{sub}/resourceGroups/{rg}", type_, name.split("/"))
     body: dict[str, JsonValue] = {k: v for k, v in entry.items() if k not in ("subscriptionId", "resourceGroup")}
     body["id"] = rid
+    # The scope is part of the report address so same-named resources in different groups stay distinguishable.
+    scope = (rg,) if sub == subscription_id else (sub, rg)
     return Resource(
         type=type_,
         name=name,
         id=rid,
         body=body,
-        module_path=MODULE_PATH,
+        module_path=(MODULE_PREFIX, *scope),
         subscription_id=sub,
         resource_group=rg,
     )
 
 
 def merge_existing(deployed: list[Resource], existing: Iterable[Resource]) -> tuple[list[Resource], list[str]]:
-    """Append ``existing`` after ``deployed``; what the template deploys itself wins (and is reported)."""
-    known = {r.id.lower() for r in deployed}
+    """Append ``existing`` after ``deployed``; what the template deploys itself wins (and is reported).
+
+    Usage files and discounts address a resource by type and name only, so two different resources sharing both
+    would silently share (and, in ``collect``, duplicate) their settings: that is rejected.
+    """
+    by_id = {r.id.lower(): r for r in deployed}
+    by_name = {(r.type.lower(), r.name.lower()): r for r in deployed}
     merged = list(deployed)
     skipped: list[str] = []
     for res in existing:
-        if res.id.lower() in known:
+        if res.id.lower() in by_id:
             skipped.append(f"existing {res.type}/{res.name} is also deployed by the template; using the template's")
             continue
+        clash = by_name.get((res.type.lower(), res.name.lower()))
+        if clash is not None:
+            raise ExistingError(
+                f"{res.type}/{res.name} exists in {res.resource_group} and {clash.resource_group}; usage files "
+                "are keyed by type and name, so same-named resources cannot be told apart"
+            )
+        by_id[res.id.lower()] = res
+        by_name[(res.type.lower(), res.name.lower())] = res
         merged.append(res)
     return merged, skipped

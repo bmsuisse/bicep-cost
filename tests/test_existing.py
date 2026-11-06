@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -71,7 +72,9 @@ def test_existing_plan_is_priced_and_the_site_runs_on_it(
     code, report, _ = run_estimate(capsys, fixtures_dir, "--existing", str(write(tmp_path, {"resources": [plan]})))
     assert code == 0
     assert report["total_monthly"] == pytest.approx(0.178 * HOURS * 2)
-    assert by_type(report, "Microsoft.Web/serverfarms")["address"] == "existing/Microsoft.Web/serverfarms/shared-plan"
+    assert (
+        by_type(report, "Microsoft.Web/serverfarms")["address"] == "existing/rg/Microsoft.Web/serverfarms/shared-plan"
+    )
     assert by_type(report, "Microsoft.Web/sites")["status"] == "included"
 
 
@@ -154,3 +157,22 @@ def test_overlap_with_the_template_is_reported_in_the_diagnostics(
     code, report, _ = run_estimate(capsys, fixtures_dir, "--existing", str(write(tmp_path, [site])))
     assert code == 0
     assert "also deployed by the template" in json.dumps(report)
+
+
+def test_report_address_includes_the_scope_when_it_is_not_the_deployments(tmp_path: Path) -> None:
+    other_rg = {**PLAN, "name": "p2", "resourceGroup": "rg-other"}
+    other_sub = {**PLAN, "name": "p3", "subscriptionId": "sub2", "resourceGroup": "rg-x"}
+    res_default, res_rg, res_sub = load_existing([write(tmp_path, [PLAN, other_rg, other_sub])], SUB, RG)
+    assert res_default.address == "existing/rg/Microsoft.Web/serverfarms/shared-plan"
+    assert res_rg.address == "existing/rg-other/Microsoft.Web/serverfarms/p2"
+    assert res_sub.address == "existing/sub2/rg-x/Microsoft.Web/serverfarms/p3"
+
+
+def test_same_named_resources_in_different_groups_are_rejected() -> None:
+    deployed = make_resource("Microsoft.Web/serverfarms", "shared-plan", {})
+    elsewhere = make_resource("Microsoft.Web/serverfarms", "Shared-Plan", {})
+    elsewhere = replace(elsewhere, id=elsewhere.id.replace("/rg/", "/rg-other/"), resource_group="rg-other")
+    with pytest.raises(ExistingError, match="cannot be told apart"):
+        merge_existing([deployed], [elsewhere])
+    with pytest.raises(ExistingError, match="cannot be told apart"):
+        merge_existing([], [deployed, elsewhere])
