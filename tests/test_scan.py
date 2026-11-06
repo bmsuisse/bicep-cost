@@ -9,7 +9,15 @@ from bicep_cost.armexpr import JsonValue
 from bicep_cost.calc import estimate_resources
 from bicep_cost.collect.arm import ArmClient, AzureError
 from bicep_cost.prices import PriceClient
-from bicep_cost.scan import fetch_inventory, in_scope, reconcile, split_id, to_resources
+from bicep_cost.scan import (
+    ambiguous_ids,
+    fetch_inventory,
+    in_scope,
+    reconcile,
+    split_id,
+    to_resources,
+    without_aks_nodes,
+)
 from bicep_cost.usage import UsageConfig
 from tests.conftest import fake_fetcher
 from tests.test_collect import FakeAzure
@@ -86,7 +94,9 @@ def test_fetch_inventory_follows_skip_tokens_and_filters_groups() -> None:
     az.on("Microsoft.ResourceGraph/resources", respond)
     rows = fetch_inventory(ArmClient(az), SUB, ("rg-a",))
     assert len(rows) == 2
-    assert "resourceGroup in~ ('rg-a')" in str(bodies[0]["query"])
+    query = str(bodies[0]["query"])
+    assert "resourceGroup in~ ('rg-a')" in query
+    assert query.index("where") < query.index("project")  # project drops the resourceGroup column
     assert bodies[0]["subscriptions"] == [SUB]
     assert bodies[1]["options"] == {"$top": 1000, "$skipToken": "next"}
 
@@ -213,3 +223,56 @@ def test_scan_strict_fails_on_unpriced_resources(azure: FakeAzure, capsys: pytes
     code = cli.main(["scan", "--strict", "--currency", "USD"])
     capsys.readouterr()
     assert code == 2
+
+
+def test_managed_resource_without_a_billing_row_keeps_its_model(prices: PriceClient) -> None:
+    managed = {**PLAN_ROW, "managedBy": WORKSPACE}
+    estimate = estimate_resources(to_resources([managed]), prices, UsageConfig())
+    modelled = estimate.monthly
+    reconcile(estimate, costs_of((10.0, GONE_VM)), DAYS)
+    assert estimate.monthly == modelled > 0
+
+
+def test_priced_but_empty_estimates_are_rescued_by_actuals(prices: PriceClient) -> None:
+    account = row(
+        f"/subscriptions/{SUB}/resourceGroups/rg-a/providers/Microsoft.CognitiveServices/accounts/ai",
+        "Microsoft.CognitiveServices/accounts",
+        location="westeurope",
+        kind="OpenAI",
+        sku={"name": "S0"},
+    )
+    estimate = estimate_resources(to_resources([account]), prices, UsageConfig())
+    assert estimate.monthly == 0
+    reconcile(estimate, costs_of((40.0, str(account["id"]))), DAYS)
+    assert estimate.monthly == pytest.approx(40 * FACTOR)
+
+
+def test_same_name_in_two_groups_is_ambiguous() -> None:
+    twin = row(PLAN.replace("rg-a", "rg-b"), "Microsoft.Web/serverFarms")
+    resources = to_resources([PLAN_ROW, twin, WORKSPACE_ROW])
+    assert ambiguous_ids(resources) == {PLAN.lower(), PLAN.replace("rg-a", "rg-b").lower()}
+
+
+def test_resources_of_aks_node_groups_are_left_to_the_cluster_estimate() -> None:
+    cluster = row(
+        f"/subscriptions/{SUB}/resourceGroups/rg-a/providers/Microsoft.ContainerService/managedClusters/aks",
+        "Microsoft.ContainerService/managedClusters",
+        properties={"nodeResourceGroup": "MC_rg-a_aks_westeurope"},
+    )
+    nodes = row(
+        f"/subscriptions/{SUB}/resourceGroups/mc_rg-a_aks_westeurope/providers/Microsoft.Compute/virtualMachineScaleSets/pool1",
+        "Microsoft.Compute/virtualMachineScaleSets",
+    )
+    kept, skipped = without_aks_nodes(to_resources([cluster, nodes, PLAN_ROW]))
+    assert skipped == 1
+    assert [r.name for r in kept] == ["aks", "plan1"]
+
+
+def test_scan_rejects_a_usage_file_in_another_currency(
+    azure: FakeAzure, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    usage = tmp_path / "u.toml"
+    usage.write_text('[meta]\ncost_currency = "EUR"\n')
+    code = cli.main(["scan", "--currency", "USD", "--usage", str(usage)])
+    assert code == 1
+    assert "currency conversion is not supported" in capsys.readouterr().err

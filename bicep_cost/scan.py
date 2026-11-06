@@ -34,9 +34,10 @@ def fetch_inventory(
     for group in resource_groups:
         if not _RESOURCE_GROUP.match(group):
             raise ValueError(f"invalid resource group name {group!r}")
-    query = "resources | project id, name, type, location, kind, sku, properties, plan, zones, managedBy"
-    if resource_groups:
+    query = "resources"
+    if resource_groups:  # filter first: `project` drops the resourceGroup column
         query += " | where resourceGroup in~ (" + ", ".join(f"'{g}'" for g in resource_groups) + ")"
+    query += " | project id, name, type, location, kind, sku, properties, plan, zones, managedBy"
     rows: list[dict[str, JsonValue]] = []
     skip: str | None = None
     while True:
@@ -129,9 +130,10 @@ def reconcile(estimate: Estimate, costs: dict[str, tuple[float, str]], window_da
         row.modelled += est.monthly
         row.actual += actual
         # resources of a managed service (Databricks / AKS nodes, ...) come and go: the bill is the truth
-        managed = bool(res.body.get("managedBy")) and est.status == "priced"
-        if (actual > 0 and est.status in UNPRICED) or managed:
-            est.notes.append(f"{est.status}: priced from its actual cost instead of the template-style model")
+        unmodelled = est.status in UNPRICED or (est.status == "priced" and est.monthly == 0)
+        managed = bool(res.body.get("managedBy")) and est.status == "priced" and key in costs
+        if (actual > 0 and unmodelled) or managed:
+            est.notes.append(f"{est.status}: priced from its actual cost instead of the model")
             est.items = [LineItem("actual cost (Cost Management, scaled to a month)", 1, "usage", fixed_amount=actual)]
             est.items[0].monthly = actual
             est.status = "priced"
@@ -228,3 +230,22 @@ def add_coverage_json(text: str, cov: Coverage) -> str:
     data = json.loads(text)
     data["coverage"] = coverage_json(cov)
     return json.dumps(data, indent=2) + "\n"
+
+
+def without_aks_nodes(resources: list[Resource]) -> tuple[list[Resource], int]:
+    """Drop resources in AKS node resource groups: the cluster's estimate already prices its node pools."""
+    node_groups = {
+        (r.subscription_id.lower(), str(r.get("properties.nodeResourceGroup")).lower())
+        for r in resources
+        if r.type.lower() == "microsoft.containerservice/managedclusters" and r.get("properties.nodeResourceGroup")
+    }
+    kept = [r for r in resources if (r.subscription_id.lower(), r.resource_group.lower()) not in node_groups]
+    return kept, len(resources) - len(kept)
+
+
+def ambiguous_ids(resources: list[Resource]) -> set[str]:
+    """Ids of resources whose type and name also exist in another group: usage tables are keyed by name only."""
+    seen: dict[tuple[str, str], list[str]] = defaultdict(list)
+    for r in resources:
+        seen[(r.type.lower(), r.name.lower())].append(r.id.lower())
+    return {rid for ids in seen.values() if len(ids) > 1 for rid in ids}

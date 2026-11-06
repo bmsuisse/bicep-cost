@@ -22,12 +22,14 @@ from bicep_cost.pricesheet import PriceSheet
 from bicep_cost.report import EstimateJson, render_csv, render_diff, render_json, render_markdown, render_text
 from bicep_cost.scan import (
     add_coverage_json,
+    ambiguous_ids,
     fetch_inventory,
     in_scope,
     reconcile,
     render_coverage_markdown,
     render_coverage_text,
     to_resources,
+    without_aks_nodes,
 )
 from bicep_cost.spikes import MAX_DAILY_DAYS, RETRY_WAITS, detect_spikes, resolve_scope, validate_window
 from bicep_cost.spikes import render_json as render_spikes_json
@@ -469,8 +471,14 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     baseline = _load_report(args.baseline) if args.baseline else None
     groups = tuple(args.resource_group)
     arm = ArmClient(http_transport(throttle_waits=RETRY_WAITS), days=args.days)
-    resources = to_resources(fetch_inventory(arm, subscription, groups))
+    resources, node_resources = without_aks_nodes(to_resources(fetch_inventory(arm, subscription, groups)))
     print(f"bicep-cost: {len(resources)} resources found in subscription {subscription}", file=sys.stderr)
+    if node_resources:
+        print(
+            f"bicep-cost: {node_resources} resource(s) in AKS node resource groups are covered by the clusters' "
+            "node pool estimate",
+            file=sys.stderr,
+        )
     costs: dict[str, tuple[float, str]] = {}
     if args.actuals or args.measure:
         costs = in_scope(arm.costs_by_resource(subscription), subscription, groups)
@@ -478,7 +486,14 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     with tempfile.TemporaryDirectory() as tmp:
         if args.measure:
             print(f"bicep-cost: measuring usage over the last {args.days} days ...", file=sys.stderr)
-            result = collect_all(resources, arm, workers=args.workers, costs=costs)
+            ambiguous = ambiguous_ids(resources)
+            if ambiguous:
+                print(
+                    f"bicep-cost: warning: {len(ambiguous)} resource(s) share type and name with a resource in "
+                    "another resource group and are not measured (usage files are keyed by name)",
+                    file=sys.stderr,
+                )
+            result = collect_all(resources, arm, workers=args.workers, costs=costs, skip_ids=frozenset(ambiguous))
             for w in result.warnings:
                 print(f"bicep-cost: warning: {w}", file=sys.stderr)
             header = [f"Measured usage of subscription {subscription}, window {args.days} d"]
@@ -490,6 +505,11 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     currency = normalize_currency(
         args.currency or usage.cost_currency or billing or (sheet.currency if sheet else "USD")
     )
+    if usage.cost_currency and normalize_currency(usage.cost_currency) != currency:
+        raise ValueError(
+            f"usage file costs are in {usage.cost_currency}, but the estimate is in {currency}; "
+            "currency conversion is not supported"
+        )
     if billing and billing != currency:
         raise ValueError(f"actual costs are in {billing}, but the estimate is in {currency}; no conversion supported")
     if sheet and sheet.currency != currency:

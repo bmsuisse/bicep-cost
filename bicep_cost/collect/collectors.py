@@ -489,8 +489,9 @@ def collect_all(
     arm: ArmClient,
     workers: int = 8,
     costs: dict[str, tuple[float, str]] | None = None,
+    skip_ids: frozenset[str] = frozenset(),
 ) -> CollectionResult:
-    """Measure every resource with a collector; ``costs`` (id -> cost, currency) skips the per-group query."""
+    """Measure every resource with a collector (except ``skip_ids``); ``costs`` skips the per-group cost query."""
     index = ResourceIndex(resources)
     warnings: list[str] = []
     if costs is None:
@@ -501,7 +502,7 @@ def collect_all(
             except AzureError as exc:
                 warnings.append(f"cost data for {rg} unavailable: {exc}")
     collection = Collection(arm, index, costs)
-    targets = [r for r in resources if r.type.lower() in COLLECTORS]
+    targets = [r for r in resources if r.type.lower() in COLLECTORS and r.id.lower() not in skip_ids]
 
     def run(res: Resource) -> tuple[Resource, Collected | None, str | None]:
         try:
