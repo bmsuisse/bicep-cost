@@ -277,3 +277,18 @@ def test_text_output_keeps_full_resource_ids() -> None:
     (found,) = find_spikes(series(rid, 10, 300), START, LAST_DAY, 3, 5.0, 1.5)
     report = spikes.SpikeReport("/s", "EUR", "ActualCost", "ResourceId", START, LAST_DAY, 3, [found], {})
     assert rid in spikes.render_text(report)
+
+
+def test_empty_success_body_is_no_result_not_a_crash(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Empty:
+        def __enter__(self) -> "Empty":
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b""
+
+    monkeypatch.setattr(arm.urllib.request, "urlopen", lambda *_, **__: Empty())
+    assert arm.http_transport(lambda: "token")("GET", "https://management.azure.com/x", None) is None

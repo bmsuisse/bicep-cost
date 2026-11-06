@@ -21,10 +21,11 @@ from bicep_cost.model import Estimate, LineItem
 
 ARG_API = "2022-10-01"
 PAGE_SIZE = 1000
-FIELDS = ("location", "kind", "sku", "properties", "plan", "zones", "managedBy")
+FIELDS = ("location", "kind", "sku", "properties", "plan", "zones", "managedBy", "tags")
 _RESOURCE_GROUP = re.compile(r"^[\w.()-]{1,90}$")
 _ID = re.compile(r"^/subscriptions/([^/]+)/resourcegroups/([^/]+)/providers/([^/]+)/(.+)$", re.IGNORECASE)
 UNPRICED = ("unsupported", "unresolved")
+MIN_ACTUAL = 0.01  # per month; below this a billing row is rounding noise
 
 
 def fetch_inventory(
@@ -37,7 +38,7 @@ def fetch_inventory(
     query = "resources"
     if resource_groups:  # filter first: `project` drops the resourceGroup column
         query += " | where resourceGroup in~ (" + ", ".join(f"'{g}'" for g in resource_groups) + ")"
-    query += " | project id, name, type, location, kind, sku, properties, plan, zones, managedBy"
+    query += " | project id, name, type, location, kind, sku, properties, plan, zones, managedBy, tags"
     rows: list[dict[str, JsonValue]] = []
     skip: str | None = None
     while True:
@@ -115,6 +116,13 @@ class Coverage:
         return sum(r.modelled for r in self.rows)
 
 
+def is_managed(res: Resource) -> bool:
+    """Nodes of a managed service come and go with the workload: Databricks tags its VMs ``Vendor: Databricks``."""
+    tags = res.body.get("tags")
+    vendor = next((v for k, v in tags.items() if k.lower() == "vendor"), "") if isinstance(tags, dict) else ""
+    return bool(res.body.get("managedBy")) or str(vendor).lower() == "databricks"
+
+
 def reconcile(estimate: Estimate, costs: dict[str, tuple[float, str]], window_days: int) -> Coverage:
     """Compare the estimate with actual cost per type and price unpriced resources from their actual cost."""
     factor = HOURS_PER_MONTH / 24 / window_days
@@ -129,11 +137,10 @@ def reconcile(estimate: Estimate, costs: dict[str, tuple[float, str]], window_da
         row.resources += 1
         row.modelled += est.monthly
         row.actual += actual
-        # resources of a managed service (Databricks / AKS nodes, ...) come and go: the bill is the truth
         # nothing modelled: no estimator, or one that returns no line items (usage-only types such as AI accounts)
         unmodelled = est.status in (*UNPRICED, "free") or (est.status == "priced" and not est.items)
-        managed = bool(res.body.get("managedBy")) and est.status == "priced" and key in costs
-        if (actual > 0 and unmodelled) or managed:
+        managed = is_managed(res) and est.status == "priced" and key in costs
+        if (actual >= MIN_ACTUAL and unmodelled) or managed:
             est.notes.append(f"{est.status}: priced from its actual cost instead of the model")
             est.items = [LineItem("actual cost (Cost Management, scaled to a month)", 1, "usage", fixed_amount=actual)]
             est.items[0].monthly = actual

@@ -337,3 +337,20 @@ def test_an_explicit_zero_estimate_is_kept(prices: PriceClient) -> None:
     assert estimate.resources[0].items  # modelled, and the model says zero
     reconcile(estimate, costs_of((500.0, account_id)), DAYS)
     assert estimate.monthly < 500
+
+
+def test_databricks_tagged_nodes_are_priced_from_the_bill(prices: PriceClient) -> None:
+    tagged: dict[str, JsonValue] = {**PLAN_ROW, "tags": {"Vendor": "Databricks", "ClusterId": "0101-abc"}}
+    estimate = estimate_resources(to_resources([tagged]), prices, UsageConfig())
+    assert estimate.monthly > 0
+    reconcile(estimate, costs_of((10.0, PLAN)), DAYS)
+    assert estimate.monthly == pytest.approx(10 * FACTOR)
+
+
+def test_sub_cent_billing_rows_do_not_turn_free_resources_into_billed_ones(prices: PriceClient) -> None:
+    nic_id = f"/subscriptions/{SUB}/resourceGroups/rg-a/providers/Microsoft.Network/networkInterfaces/nic"
+    estimate = estimate_resources(
+        to_resources([row(nic_id, "Microsoft.Network/networkInterfaces")]), prices, UsageConfig()
+    )
+    reconcile(estimate, costs_of((0.004, nic_id)), DAYS)
+    assert estimate.resources[0].status == "free"

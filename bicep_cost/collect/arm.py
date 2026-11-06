@@ -76,7 +76,8 @@ def http_transport(
             request = urllib.request.Request(url, data=data, headers=headers, method=method)
             try:
                 with urllib.request.urlopen(request, timeout=90) as response:
-                    return json.loads(response.read())
+                    text = response.read()
+                    return json.loads(text) if text.strip() else None  # some calls answer 200 / 204 without a body
             except urllib.error.HTTPError as exc:
                 if exc.code == 404:
                     return None
