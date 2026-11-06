@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import sys
+import tempfile
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -19,6 +20,15 @@ from bicep_cost.existing import load_existing, merge_existing
 from bicep_cost.prices import PriceClient, PriceError, build_filter, default_cache_dir, normalize_currency
 from bicep_cost.pricesheet import PriceSheet
 from bicep_cost.report import EstimateJson, render_csv, render_diff, render_json, render_markdown, render_text
+from bicep_cost.scan import (
+    add_coverage_json,
+    fetch_inventory,
+    in_scope,
+    reconcile,
+    render_coverage_markdown,
+    render_coverage_text,
+    to_resources,
+)
 from bicep_cost.spikes import MAX_DAILY_DAYS, RETRY_WAITS, detect_spikes, resolve_scope, validate_window
 from bicep_cost.spikes import render_json as render_spikes_json
 from bicep_cost.spikes import render_text as render_spikes_text
@@ -167,6 +177,46 @@ def build_parser() -> argparse.ArgumentParser:
     )
     collect.add_argument("--workers", type=int, default=8)
 
+    scan = sub.add_parser(
+        "scan",
+        help="estimate a deployed subscription (or resource groups) from Azure Resource Graph, no template needed",
+        description="Read-only: lists the resources with Azure Resource Graph, prices them like a template and, with "
+        "--actuals, compares the estimate with the Cost Management bill per resource type (coverage table). "
+        "--measure additionally reads Azure Monitor / Log Analytics for the usage-based quantities (same as `collect`) "
+        "and implies --actuals. Resource types without an estimator are priced from their actual cost when actuals "
+        "are available. Needs `az login` with Reader (Cost Management Reader for actuals).",
+    )
+    scan.add_argument("--subscription-id", help="default: the az CLI's current subscription")
+    scan.add_argument(
+        "--resource-group", action="append", default=[], metavar="NAME", help="only this resource group; repeatable"
+    )
+    scan.add_argument("--actuals", action="store_true", help="reconcile with Cost Management actual cost")
+    scan.add_argument("--measure", action="store_true", help="measure usage from Azure Monitor (implies --actuals)")
+    scan.add_argument("--days", type=_positive_int, default=30, help="actuals / measurement window (default 30)")
+    scan.add_argument("--workers", type=int, default=8, help="parallel measurement calls")
+    scan.add_argument("--save-usage", type=Path, help="keep the measured usage as a TOML file (with --measure)")
+    scan.add_argument(
+        "--usage",
+        type=Path,
+        action="append",
+        default=[],
+        help="TOML usage file with overrides (discounts, assumptions); repeatable, wins over measurements",
+    )
+    scan.add_argument("--currency", default=None, help="default: the billing currency of the actuals, else USD")
+    scan.add_argument("--location", default="westeurope", help="region for resources without a location")
+    scan.add_argument("--format", choices=["text", "json", "markdown", "csv"], default="text")
+    scan.add_argument("--group-by", choices=["resource", "type"], default="type")
+    scan.add_argument("--detail", action="store_true", help="text format: line items, notes and assumptions")
+    scan.add_argument("-o", "--output", type=Path, help="write the report to a file instead of stdout")
+    scan.add_argument("--strict", action="store_true", help="exit with 2 if a resource could not be priced")
+    _add_budget_args(scan)
+    scan.add_argument("--baseline", type=Path, help="saved scan/estimate JSON for --fail-increase-percent")
+    scan_account = scan.add_mutually_exclusive_group()
+    scan_account.add_argument("--azure-prices", action="store_true", help="use the subscription's price sheet")
+    scan_account.add_argument("--price-sheet", type=Path, help="saved account price sheet JSON or Azure CSV")
+    scan.add_argument("--save-price-sheet", type=Path, help="save the sheet fetched with --azure-prices")
+    _add_cache_args(scan)
+
     spikes = sub.add_parser(
         "spikes",
         help="find Azure cost spikes: recent daily cost vs the median of the days before",
@@ -266,19 +316,25 @@ def discover_usage_files(template: Path, parameters: Path | None) -> list[Path]:
     return seen
 
 
-def _cmd_estimate(args: argparse.Namespace) -> int:
+def _load_price_sheet(args: argparse.Namespace, subscription: str | None = None) -> PriceSheet | None:
+    """The account price sheet requested by --price-sheet / --azure-prices, or None for retail prices."""
     if args.save_price_sheet and not args.azure_prices:
         raise ValueError("--save-price-sheet requires --azure-prices")
     if args.azure_prices and args.offline:
         raise ValueError("--azure-prices requires network access; use --price-sheet with --offline")
     sheet = PriceSheet.load(args.price_sheet) if args.price_sheet else None
     if args.azure_prices:
-        subscription = args.subscription_id
+        subscription = subscription or args.subscription_id
         if subscription == "00000000-0000-0000-0000-000000000000":
             subscription = az_current_subscription()
         sheet = PriceSheet.download(subscription, http_transport())
         if args.save_price_sheet:
             sheet.save(args.save_price_sheet)
+    return sheet
+
+
+def _cmd_estimate(args: argparse.Namespace) -> int:
+    sheet = _load_price_sheet(args)
     if args.fail_increase_percent is not None and args.baseline is None:
         raise ValueError("--fail-increase-percent requires --baseline REPORT.json")
     baseline = _load_report(args.baseline) if args.baseline else None
@@ -405,6 +461,68 @@ def _cmd_collect(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_scan(args: argparse.Namespace) -> int:
+    subscription = args.subscription_id or az_current_subscription()
+    sheet = _load_price_sheet(args, subscription)
+    if args.fail_increase_percent is not None and args.baseline is None:
+        raise ValueError("--fail-increase-percent requires --baseline REPORT.json")
+    baseline = _load_report(args.baseline) if args.baseline else None
+    groups = tuple(args.resource_group)
+    arm = ArmClient(http_transport(throttle_waits=RETRY_WAITS), days=args.days)
+    resources = to_resources(fetch_inventory(arm, subscription, groups))
+    print(f"bicep-cost: {len(resources)} resources found in subscription {subscription}", file=sys.stderr)
+    costs: dict[str, tuple[float, str]] = {}
+    if args.actuals or args.measure:
+        costs = in_scope(arm.costs_by_resource(subscription), subscription, groups)
+    usage_files = list(args.usage)
+    with tempfile.TemporaryDirectory() as tmp:
+        if args.measure:
+            print(f"bicep-cost: measuring usage over the last {args.days} days ...", file=sys.stderr)
+            result = collect_all(resources, arm, workers=args.workers, costs=costs)
+            for w in result.warnings:
+                print(f"bicep-cost: warning: {w}", file=sys.stderr)
+            header = [f"Measured usage of subscription {subscription}, window {args.days} d"]
+            measured = args.save_usage or Path(tmp) / "measured.usage.toml"
+            measured.write_text(render_usage_toml(result.findings, result.notes, header, result.cost_currency))
+            usage_files.insert(0, measured)
+        usage = UsageConfig.load(usage_files)
+    billing = next(iter({normalize_currency(cur) for _, cur in costs.values()}), None)
+    currency = normalize_currency(
+        args.currency or usage.cost_currency or billing or (sheet.currency if sheet else "USD")
+    )
+    if billing and billing != currency:
+        raise ValueError(f"actual costs are in {billing}, but the estimate is in {currency}; no conversion supported")
+    if sheet and sheet.currency != currency:
+        raise ValueError(
+            f"account price sheet is in {sheet.currency}, estimate is in {currency}; no conversion supported"
+        )
+    if baseline and baseline["currency"] != currency:
+        raise ValueError("cannot compare reports in different currencies")
+    client = _client(args, currency)
+    client.price_sheet = sheet
+    estimate = estimate_resources(resources, client, usage, default_region=args.location.replace(" ", "").lower())
+    coverage = reconcile(estimate, costs, args.days) if costs else None
+    source = f"subscription {subscription}" + (f" (resource groups: {', '.join(groups)})" if groups else "")
+    if args.format == "json":
+        text = render_json(estimate, source, [])
+        text = add_coverage_json(text, coverage) if coverage else text
+    elif args.format == "csv":
+        text = render_csv(estimate)
+    elif args.format == "markdown":
+        text = render_markdown(estimate, source, []) + (render_coverage_markdown(coverage) if coverage else "")
+    else:
+        text = render_text(estimate, source, [], detail=args.detail, group_by=args.group_by)
+        text += render_coverage_text(coverage) if coverage else ""
+    if args.output:
+        args.output.write_text(text)
+    else:
+        sys.stdout.write(text)
+    if args.strict and (estimate.count("unresolved") or estimate.count("unsupported")):
+        print("bicep-cost: some resources were not priced (--strict)", file=sys.stderr)
+        return 2
+    return _budget_status(estimate.monthly, estimate.currency, args, baseline)
+
+
 def _cmd_spikes(args: argparse.Namespace) -> int:
     validate_window(args.days, args.recent)
     scope = resolve_scope(args.scope, args.subscription_id, args.resource_group)
@@ -479,6 +597,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "collect":
             return _cmd_collect(args)
+        if args.command == "scan":
+            return _cmd_scan(args)
         if args.command == "spikes":
             return _cmd_spikes(args)
         if args.command == "init-usage":

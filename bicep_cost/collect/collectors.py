@@ -484,15 +484,22 @@ SECTION_OF_TYPE = {
 }
 
 
-def collect_all(resources: list[Resource], arm: ArmClient, workers: int = 8) -> CollectionResult:
+def collect_all(
+    resources: list[Resource],
+    arm: ArmClient,
+    workers: int = 8,
+    costs: dict[str, tuple[float, str]] | None = None,
+) -> CollectionResult:
+    """Measure every resource with a collector; ``costs`` (id -> cost, currency) skips the per-group query."""
     index = ResourceIndex(resources)
-    costs: dict[str, tuple[float, str]] = {}
     warnings: list[str] = []
-    for sub, rg in sorted({(r.subscription_id, r.resource_group) for r in resources}):
-        try:
-            costs.update(arm.costs_by_resource(sub, rg))
-        except AzureError as exc:
-            warnings.append(f"cost data for {rg} unavailable: {exc}")
+    if costs is None:
+        costs = {}
+        for sub, rg in sorted({(r.subscription_id, r.resource_group) for r in resources}):
+            try:
+                costs.update(arm.costs_by_resource(sub, rg))
+            except AzureError as exc:
+                warnings.append(f"cost data for {rg} unavailable: {exc}")
     collection = Collection(arm, index, costs)
     targets = [r for r in resources if r.type.lower() in COLLECTORS]
 
