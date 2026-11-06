@@ -20,7 +20,17 @@ from bicep_cost.estimators.aca import parse_memory_gib
 from bicep_cost.estimators.appservice import parse_plan_sku
 from bicep_cost.estimators.sql import parse_sku as parse_sql_sku
 from bicep_cost.prices import PriceClient, PriceError
-from bicep_cost.rightsize import HOT_SHARE, MIN_COVERAGE, PINNED_SHARE, Candidate, Case, Signal, Stats, build_stats
+from bicep_cost.rightsize import (
+    HOT_SHARE,
+    MIN_COVERAGE,
+    PINNED_SHARE,
+    UNDER_MAX,
+    Candidate,
+    Case,
+    Signal,
+    Stats,
+    build_stats,
+)
 from bicep_cost.usage import UsageConfig
 
 Metrics = dict[str, dict[str, list[float | None]]]
@@ -544,20 +554,23 @@ def sql_case(res: Resource, env: Env, data: Metrics) -> Case:
     data_io = _stat(data, "physical_data_read_percent", env.expected, group=io_group)
     log_io = _stat(data, "log_write_percent", env.expected, group=io_group)
     signals = _signal_if_hot(workers, "workers", "worker threads")
+    notes: list[str] = []
     if parsed.model == "dtu":
-        # DTU is a blend of CPU, data IO and log IO: it is saturated for real when a component is at its limit too
+        # DTU is the highest of CPU, data IO and log IO: a component at its limit *is* the DTU at its limit, not a
+        # second signal. It is shown, so the report says what saturates.
         dtu = _stat(data, "dtu_consumption_percent", env.expected, group="dtu", trigger=True)
         metrics = [dtu, cpu, data_io, log_io, workers, storage]
         label = f"{parsed.dtu_label} ({capacity} DTU)"
         for part, what in ((cpu, "CPU"), (data_io, "data IO"), (log_io, "log IO")):
-            signals += _signal_if_hot(part, what.replace(" ", "-").lower(), what)
+            if part.hours and part.hot:
+                notes.append(f"{what} is at or above {UNDER_MAX:.0f}% in {_hours_at_least(part, UNDER_MAX)} h")
+        if notes:
+            notes = ["the DTU is the highest of CPU, data IO and log IO; " + "; ".join(notes)]
     else:
         metrics = [cpu, workers, data_io, log_io, storage]
         label = f"{sku_name} {capacity} vCores" + (" (serverless)" if parsed.serverless else "")
+        notes.append("memory is not judged: SQL Server fills its buffer pool whatever the load")
     down, up, why = _sql_candidates(res, env, sku_name, capacity)
-    notes = (
-        [] if parsed.model == "dtu" else ["memory is not judged: SQL Server fills its buffer pool whatever the load"]
-    )
     exempt = "serverless is already elastic (billed by use)" if parsed.serverless else None
     return Case(
         res.id,
@@ -613,6 +626,21 @@ def _restart_hours(series: list[float | None]) -> int:
     A drop is a replaced replica (a new baseline), not a restart: replica-level counters are not available here.
     """
     return sum(1 for before, now in pairwise(series) if before is not None and now is not None and now > before)
+
+
+def _aca_state(res: Resource) -> str:
+    """Why an app without replicas has no telemetry, when the resource itself says so."""
+    running = str(res.get("properties.runningStatus") or "")
+    provisioning = str(res.get("properties.provisioningState") or "")
+    why = [
+        text
+        for ok, text in (
+            (running.lower() == "stopped", "the app is stopped (runningStatus Stopped), so no replica can run"),
+            (provisioning.lower() == "failed", "its provisioning failed (provisioningState Failed)"),
+        )
+        if ok
+    ]
+    return f": {'; '.join(why)}" if why else ""
 
 
 def _aca_candidates(
@@ -702,7 +730,9 @@ def aca_case(res: Resource, env: Env, data: Metrics) -> Case:
     if restart_hours:
         signals.append(Signal("restarts", f"container restarts in {restart_hours} h (RestartCount went up)"))
     pinned = _hours_at_least(replicas, max_r) / max(replicas.expected, 1)
-    if max_r > min_r and pinned >= PINNED_SHARE:
+    if (
+        max_r >= 2 and max_r > min_r and pinned >= PINNED_SHARE
+    ):  # with one replica at most, "at the maximum" is just "up"
         signals.append(Signal("pinned", f"replicas at the maximum of {max_r} in {pinned:.0%} of the hours"))
     cpus, gib = _size(res)
     replica_hours = replicas.mean * HOURS_PER_MONTH
@@ -713,8 +743,9 @@ def aca_case(res: Resource, env: Env, data: Metrics) -> Case:
         f"ran in {running} of {replicas.hours} h",
     ]
     insufficient = None
+    state = _aca_state(res)
     if replicas.hours == 0:
-        insufficient = "the Replicas metric returned no data"
+        insufficient = f"the Replicas metric returned no data{state}"
     elif replicas.coverage < MIN_COVERAGE:
         insufficient = (
             f"the Replicas metric has only {replicas.hours} of {replicas.expected} hourly points: "
@@ -727,7 +758,7 @@ def aca_case(res: Resource, env: Env, data: Metrics) -> Case:
     ):
         insufficient = "the Replicas average has too few hourly points to price the replica hours"
     elif running == 0:
-        insufficient = "no replica ran in the whole window (scaled to zero, stopped or not reporting)"
+        insufficient = f"no replica ran in the whole window{state or ' (scaled to zero, stopped or not reporting)'}"
     elif running < MIN_RUNNING_HOURS:
         insufficient = f"ran in only {running} h of the window (needs {MIN_RUNNING_HOURS} h to judge)"
     return Case(

@@ -7,7 +7,8 @@ Verdicts:
 
 * ``over``: low load on every sizing metric, a smaller step of the same family would stay comfortable, and it is
   cheaper. Carries a proposal.
-* ``under``: sustained saturation plus an independent second signal. Carries a proposal when one larger step fixes it.
+* ``under``: saturation plus either an independent second signal or load that is sustained on its own (the hourly
+  *average* saturated for a large share of the whole window). Carries a proposal when one larger step fixes it.
 * ``watch``: something is off but not enough to propose (one signal only, thin data, contradictory data, unpriced).
 * ``ok``: nothing to do, or nothing that can safely be done.
 * ``no-data``: Azure Monitor returned nothing usable.
@@ -30,6 +31,12 @@ TARGET_MAX = 85.0
 UNDER_P95 = 85.0
 UNDER_MAX = 95.0
 HOT_SHARE = 0.02
+# Sustained saturation corroborates itself. An hourly maximum is the busiest minute of the hour, so a p95 of 100% can
+# be one minute of a batch job; the hourly *average* at or above SUSTAINED_AVG means most of the hour was saturated.
+# A metric whose average was that high in at least SUSTAINED_SHARE of the hours of the full window (about 6 h a day,
+# every hour returned) needs no second signal: a nightly batch window or a handful of spikes stay below it.
+SUSTAINED_AVG = 90.0
+SUSTAINED_SHARE = 0.25
 MIN_COVERAGE = 0.9  # share of the expected hourly points that must have come back
 MIN_DAYS = 14
 FULL_CYCLE_DAYS = 30  # shorter windows can hide a monthly cycle: no `over` proposal
@@ -52,6 +59,8 @@ class Stats:
     group: str = ""  # capacity this metric scales with ("cpu", "memory", "dtu"); empty: shown, not used to size
     trigger: bool = False  # a saturated value of this metric can make the resource `under`
     required: bool = False  # shown, not sized on, but a verdict needs its coverage (it holds a contradicting signal)
+    averages: tuple[float, ...] = ()  # the hourly averages that came back (empty when not read)
+    gaps: tuple[int, int, int] | None = None  # (before the first point, between points, after the last) in hours
 
     @property
     def hours(self) -> int:
@@ -79,6 +88,37 @@ class Stats:
     def hot(self) -> bool:
         return self.p95 >= UNDER_P95 or self.share_at_least(UNDER_MAX) >= HOT_SHARE
 
+    def avg_hours_at_least(self, limit: float) -> int:
+        return sum(1 for v in self.averages if v >= limit)
+
+    @property
+    def peak_average(self) -> float:
+        return max(self.averages, default=0.0)
+
+    @property
+    def sustained(self) -> bool:
+        """The hourly average was saturated in a large share of the expected hours, and every hour came back."""
+        return (
+            bool(self.expected)
+            and self.hours >= self.expected
+            and self.avg_hours_at_least(SUSTAINED_AVG) / self.expected >= SUSTAINED_SHARE
+        )
+
+    def missing(self) -> str:
+        """Where the hours that did not come back are (empty when nothing is missing or the positions are unknown)."""
+        if self.gaps is None or self.hours >= self.expected:
+            return ""
+        before, between, after = self.gaps
+        if before and not between and not after:
+            return (
+                f"no points in the first {before} h of the window, complete after that: the resource is younger than "
+                "the window or reported nothing before"
+            )
+        if after and not before and not between:
+            return f"no points in the last {after} h of the window: it stopped reporting"
+        where = ((before, "before the first point"), (between, "between points"), (after, "after the last point"))
+        return "missing: " + ", ".join(f"{n} h {w}" for n, w in where if n)
+
 
 def build_stats(
     name: str,
@@ -92,8 +132,28 @@ def build_stats(
     required: bool = False,
 ) -> Stats:
     values = tuple(v for v in maxima if v is not None)
-    means = [v for v in (averages or []) if v is not None] or list(values)
-    return Stats(name, unit, expected, values, sum(means) / len(means) if means else 0.0, group, trigger, required)
+    avgs = tuple(v for v in (averages or []) if v is not None)
+    means = list(avgs) or list(values)
+    return Stats(
+        name,
+        unit,
+        expected,
+        values,
+        sum(means) / len(means) if means else 0.0,
+        group,
+        trigger,
+        required,
+        avgs,
+        _gaps(maxima) if len(maxima) == expected else None,
+    )
+
+
+def _gaps(series: list[float | None]) -> tuple[int, int, int] | None:
+    present = [i for i, v in enumerate(series) if v is not None]
+    if not present:
+        return None
+    before, after = present[0], len(series) - 1 - present[-1]
+    return before, (present[-1] - present[0] + 1) - len(present), after
 
 
 @dataclass(frozen=True)
@@ -237,36 +297,74 @@ def decide(case: Case) -> Assessment:
     thin = [m for m in case.metrics if (m.group or m.required) and m.coverage < MIN_COVERAGE]
     if thin:
         worst = min(thin, key=lambda m: m.coverage)
+        why = f"; {worst.missing()}" if worst.missing() else ""
         return d.done(
             "watch",
-            f"{worst.name}: only {worst.hours} of {worst.expected} hourly points ({worst.coverage:.0%}); "
+            f"{worst.name}: only {worst.hours} of {worst.expected} hourly points ({worst.coverage:.0%}){why}; "
             f"{MIN_COVERAGE:.0%} needed",
         )
     if case.insufficient:
         return d.done("watch", case.insufficient)
     hot = [m for m in sizing if m.trigger and m.hot]
     if hot:
-        if not d.signals:
-            what = ", ".join(_fmt(m) for m in hot)
-            return d.done("watch", f"{what}, but no second signal (restarts, pinned replicas, limits, Advisor)")
-        return _under(d, hot)
+        sustained = [m for m in hot if case.window_days >= FULL_CYCLE_DAYS and m.sustained]
+        if not d.signals and not sustained:
+            return _watch_hot(d, hot)
+        return _under(d, hot, sustained)
     if all(m.p95 <= OVER_P95 and m.max <= OVER_MAX for m in sizing):
         return _over(d, sizing)
     worst = max(sizing, key=lambda m: m.p95)
+    limit = next((m for m in sizing if m.hot), None)
+    if limit is not None:  # saturated, but not a metric this rule sizes on: never "nothing to do"
+        return d.done(
+            "watch",
+            f"{_fmt(limit)}: at its limit, but {limit.name} is not a metric a size is proposed from "
+            "(its limit does not scale with the size); look at it by hand",
+        )
     return d.done(
         "ok", f"{_fmt(worst)}: between the over ({OVER_P95:.0f}/{OVER_MAX:.0f}%) and under thresholds, nothing to do"
     )
 
 
-def _under(d: _Decision, hot: list[Stats]) -> Assessment:
+def _character(m: Stats) -> str:
+    """How the saturation looks: the hourly *average* shows whether it was sustained or only peaks inside the hours."""
+    hours = m.avg_hours_at_least(SUSTAINED_AVG)
+    return (
+        f"hourly average at or above {SUSTAINED_AVG:.0f}% in {hours} of {m.expected} h "
+        f"({hours / max(m.expected, 1):.0%}), highest {m.peak_average:.0f}%, mean {m.mean:.0f}%"
+    )
+
+
+def _bursty_note(m: Stats) -> str:
+    peak_hours = sum(1 for v in m.values if v >= UNDER_MAX)
+    return (
+        f"bursty load: {m.name} is at or above {UNDER_MAX:.0f}% in {peak_hours} of {m.hours} h but averages "
+        f"{m.mean:.0f}%; a larger size is paid for every hour, so look at the peaks first (scale up only around the "
+        "busy hours, tune what runs then, serverless or autoscale where the type has it)"
+    )
+
+
+def _watch_hot(d: _Decision, hot: list[Stats]) -> Assessment:
     case = d.case
-    why = f"{', '.join(_fmt(m) for m in hot)} and {'; '.join(s.text for s in d.signals)}"
-    d.extra_notes += [
-        f"bursty load: {m.name} is at or above {UNDER_MAX:.0f}% in {sum(1 for v in m.values if v >= UNDER_MAX)} of "
-        f"{m.hours} h but averages {m.mean:.0f}%; check that those hours matter before paying for a larger size"
-        for m in hot
-        if m.mean < BURSTY_MEAN
+    what = "; ".join(f"{_fmt(m)} [{_character(m)}]" if m.averages else _fmt(m) for m in hot)
+    complete = case.window_days >= FULL_CYCLE_DAYS and all(m.hours >= m.expected for m in hot)
+    proof = (
+        f"not sustained (an hourly average of {SUSTAINED_AVG:.0f}% in {SUSTAINED_SHARE:.0%} of the hours would be)"
+        if complete
+        else f"a complete {FULL_CYCLE_DAYS} d window of every hour is needed to show it is sustained"
+    )
+    d.extra_notes += [_bursty_note(m) for m in hot if m.averages and m.mean < BURSTY_MEAN]
+    return d.done("watch", f"{what}: {proof}; no second signal (restarts, pinned replicas, limits, Advisor)")
+
+
+def _under(d: _Decision, hot: list[Stats], sustained: list[Stats]) -> Assessment:
+    case = d.case
+    evidence = [
+        *(s.text for s in d.signals),
+        *(f"sustained: {m.name} {_character(m)}" for m in sustained),
     ]
+    why = f"{', '.join(_fmt(m) for m in hot)} and {'; '.join(evidence)}"
+    d.extra_notes += [_bursty_note(m) for m in hot if m.mean < BURSTY_MEAN]
     sizing = [m for m in case.metrics if m.group]
     for cand in case.up:
         predicted = predict(sizing, cand.factors)

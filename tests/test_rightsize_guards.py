@@ -215,7 +215,7 @@ def test_a_falling_restart_counter_is_a_new_baseline_not_a_restart(prices: Price
         "api",
         {
             "Replicas": flat(1, 1),
-            "CpuPercentage": flat(95),
+            "CpuPercentage": flat(95, 20),  # peaks inside the hours: not sustained on its own
             "MemoryPercentage": flat(40),
             "RestartCount": {"maximum": counter, "average": list(counter)},
         },
@@ -230,7 +230,7 @@ def test_a_restart_counter_that_was_already_nonzero_before_the_window_is_not_a_s
         "api",
         {
             "Replicas": flat(1, 1),
-            "CpuPercentage": flat(95),
+            "CpuPercentage": flat(95, 20),
             "MemoryPercentage": flat(40),
             "RestartCount": {"maximum": hourly(3), "average": hourly(3)},  # cumulative, constant since before
         },
@@ -318,7 +318,7 @@ def test_a_few_stray_exhausted_credit_points_are_not_a_second_signal(prices: Pri
         PG_T,
         "db",
         {
-            "cpu_percent": flat(100),
+            "cpu_percent": flat(100, 20),
             "memory_percent": flat(50),
             "storage_percent": flat(10),
             "active_connections": flat(10),

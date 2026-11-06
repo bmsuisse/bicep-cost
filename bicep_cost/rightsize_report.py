@@ -11,6 +11,8 @@ from bicep_cost.rightsize import (
     OVER_MAX,
     OVER_P95,
     PINNED_SHARE,
+    SUSTAINED_AVG,
+    SUSTAINED_SHARE,
     TARGET_MAX,
     TARGET_P95,
     UNDER_MAX,
@@ -34,6 +36,8 @@ THRESHOLDS = {
     "min_days": MIN_DAYS,
     "full_cycle_days": FULL_CYCLE_DAYS,
     "pinned_share": PINNED_SHARE,
+    "sustained_avg": SUSTAINED_AVG,
+    "sustained_share": SUSTAINED_SHARE,
 }
 
 
@@ -80,7 +84,10 @@ def _metric_line(s: Stats) -> str:
     cover = f"{s.hours}/{s.expected} h ({s.coverage:.0%})"
     if not s.hours:
         return f"{s.name:<32} no data   {cover}"
-    return f"{s.name:<32} p95 {_num(s, s.p95):>7}  max {_num(s, s.max):>7}  mean {_num(s, s.mean):>7}  {cover}"
+    line = f"{s.name:<32} p95 {_num(s, s.p95):>7}  max {_num(s, s.max):>7}  mean {_num(s, s.mean):>7}  {cover}"
+    if s.trigger and s.averages and s.hot:
+        line += f"  hourly avg >= {SUSTAINED_AVG:.0f}%: {s.avg_hours_at_least(SUSTAINED_AVG)} h"
+    return line + (f"  [{s.missing()}]" if s.missing() else "")
 
 
 def _window(report: Report) -> str:
@@ -227,6 +234,9 @@ def _stats_json(s: Stats) -> dict[str, object]:
         "p95": round(s.p95, 2),
         "max": round(s.max, 2),
         "mean": round(s.mean, 2),
+        "peak_hourly_average": round(s.peak_average, 2),
+        "hours_avg_at_least_sustained": s.avg_hours_at_least(SUSTAINED_AVG),
+        "missing": s.missing() or None,
     }
 
 
