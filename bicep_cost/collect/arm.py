@@ -265,6 +265,7 @@ def parse_metrics(
     if not isinstance(values, list):
         return out
     keys = [a.lower() for a in aggregations]
+    grid = _time_grid(values)
     for metric in values:
         name = metric.get("name") if isinstance(metric, dict) else None
         series = metric.get("timeseries") if isinstance(metric, dict) else None
@@ -272,8 +273,24 @@ def parse_metrics(
             continue
         data = series[0].get("data") if isinstance(series[0], dict) else None
         points = [d for d in data if isinstance(d, dict)] if isinstance(data, list) else []
+        if grid is not None:  # one shared hourly grid: a record Azure left out becomes a missing hour
+            by_time = {str(d["timeStamp"]): d for d in points}
+            points = [by_time.get(t, {}) for t in grid]
         out[str(name.get("value", "")).lower()] = {k: [_number(d.get(k)) for d in points] for k in keys}
     return out
+
+
+def _time_grid(metrics: list[object]) -> list[str] | None:
+    """Sorted union of the data point timestamps of all metrics, or None when they do not carry any."""
+    stamps: set[str] = set()
+    for metric in metrics:
+        series = metric.get("timeseries") if isinstance(metric, dict) else None
+        data = series[0].get("data") if isinstance(series, list) and series and isinstance(series[0], dict) else None
+        for d in data if isinstance(data, list) else []:
+            if not isinstance(d, dict) or "timeStamp" not in d:
+                return None
+            stamps.add(str(d["timeStamp"]))
+    return sorted(stamps) or None
 
 
 def _number(value: object) -> float | None:

@@ -112,9 +112,27 @@ def list_price(res: Resource, env: Env, usage: dict[str, object] | None = None) 
     return total
 
 
-def _stat(data: Metrics, name: str, expected: int, *, group: str = "", trigger: bool = False, unit: str = "%") -> Stats:
+def _stat(
+    data: Metrics,
+    name: str,
+    expected: int,
+    *,
+    group: str = "",
+    trigger: bool = False,
+    unit: str = "%",
+    required: bool = False,
+) -> Stats:
     d = data.get(name.lower(), {})
-    return build_stats(name, d.get("maximum", []), d.get("average"), expected, unit=unit, group=group, trigger=trigger)
+    return build_stats(
+        name,
+        d.get("maximum", []),
+        d.get("average"),
+        expected,
+        unit=unit,
+        group=group,
+        trigger=trigger,
+        required=required,
+    )
 
 
 def _signal_if_hot(stats: Stats, name: str, label: str) -> list[Signal]:
@@ -226,7 +244,7 @@ def plan_case(res: Resource, env: Env, data: Metrics) -> Case:
     zone_redundant = res.get("properties.zoneRedundant") is True
     cpu = _stat(data, "CpuPercentage", env.expected, group="cpu", trigger=True)
     mem = _stat(data, "MemoryPercentage", env.expected, group="memory", trigger=True)
-    queue = _stat(data, "HttpQueueLength", env.expected, unit="")
+    queue = _stat(data, "HttpQueueLength", env.expected, unit="", required=True)
     signals: list[Signal] = []
     if _sustained(_hours_at_least(queue, QUEUE_LIMIT), queue):
         signals.append(
@@ -342,7 +360,7 @@ def pg_case(res: Resource, env: Env, data: Metrics) -> Case:
     active = data.get("active_connections", {}).get("maximum", [])
     limit = data.get("max_connections", {}).get("maximum", [])
     ratio = [100 * a / m if a is not None and m else None for a, m in zip(active, limit, strict=False)]
-    conn = build_stats("connections of max_connections", ratio, None, env.expected)
+    conn = build_stats("connections of max_connections", ratio, None, env.expected, required=True)
     signals = []
     if _sustained(_hours_at_least(conn, CONNECTION_LIMIT), conn):
         signals.append(
@@ -660,6 +678,15 @@ def _aligned(data: Metrics, name: str, at: list[int], *, group: str) -> Stats:
     return build_stats(name, pick(d.get("maximum")), pick(d.get("average")), len(at), group=group, trigger=True)
 
 
+def _readings_while_replicas_unknown(data: Metrics) -> bool:
+    unknown = [i for i, v in enumerate(data.get("replicas", {}).get("maximum", [])) if v is None]
+    for name in ("cpupercentage", "memorypercentage"):
+        series = data.get(name, {}).get("maximum", [])
+        if any(i < len(series) and series[i] is not None for i in unknown):
+            return True
+    return False
+
+
 def aca_case(res: Resource, env: Env, data: Metrics) -> Case:
     replicas = _stat(data, "Replicas", env.expected, unit="")
     # CPU and memory only report while a replica runs: judge them on those hours, aligned with the Replicas series
@@ -667,7 +694,7 @@ def aca_case(res: Resource, env: Env, data: Metrics) -> Case:
     running = len(running_at)
     cpu = _aligned(data, "CpuPercentage", running_at, group="cpu")
     mem = _aligned(data, "MemoryPercentage", running_at, group="memory")
-    restarts = _stat(data, "RestartCount", env.expected, unit="")
+    restarts = _stat(data, "RestartCount", env.expected, unit="", required=True)
     min_r = int(as_number(res.get("properties.template.scale.minReplicas"), 0))
     max_r = int(as_number(res.get("properties.template.scale.maxReplicas"), 10))
     signals: list[Signal] = []
@@ -693,6 +720,8 @@ def aca_case(res: Resource, env: Env, data: Metrics) -> Case:
             f"the Replicas metric has only {replicas.hours} of {replicas.expected} hourly points: "
             "scale-to-zero hours cannot be told from missing data"
         )
+    elif _readings_while_replicas_unknown(data):
+        insufficient = "CPU / memory readings exist for hours in which the replica count is unknown"
     elif (
         sum(1 for v in data.get("replicas", {}).get("average", []) if v is not None) < MIN_COVERAGE * replicas.expected
     ):

@@ -4,7 +4,7 @@ import pytest
 
 from bicep_cost import rightsize_report
 from bicep_cost.armexpr import JsonValue
-from bicep_cost.collect.arm import ArmClient, AzureError
+from bicep_cost.collect.arm import ArmClient, AzureError, parse_metrics
 from bicep_cost.context import ResourceIndex
 from bicep_cost.prices import PriceClient
 from bicep_cost.rightsize_run import analyse
@@ -356,3 +356,60 @@ def test_markdown_shows_warnings_and_skipped_resources(prices: PriceClient) -> N
     text = rightsize_report.render_markdown(report, rightsize_report.select(report))
     assert "### Warnings" in text and "Advisor is not available" in text
     assert "### Not assessed (1)" in text and "geo / named replica" in text
+
+
+# ---------------------------------------------------------------------------------------------------- unknown hours
+
+
+def test_saturated_readings_during_hours_with_an_unknown_replica_count_block_the_proposal(prices: PriceClient) -> None:
+    az = az_with(capp("api", cpu=2, memory="4Gi"))
+    replicas: dict[str, list[float | None]] = {
+        "maximum": [*[1.0] * 648, *[None] * 72],
+        "average": [*[1.0] * 648, *[None] * 72],
+    }
+    hot = [*[8.0] * 648, *[99.0] * 72]
+    az.give(
+        APP_T,
+        "api",
+        {
+            "Replicas": replicas,
+            "CpuPercentage": {"maximum": list(hot)},
+            "MemoryPercentage": {"maximum": list(hot)},
+            "RestartCount": flat(0),
+        },
+    )
+    a = run(az, prices)["api"]
+    assert (a.verdict, a.proposal) == ("watch", None)
+    assert "replica count is unknown" in a.reason
+
+
+def test_missing_restart_telemetry_blocks_a_downsize(prices: PriceClient) -> None:
+    az = az_with(capp("api", cpu=2, memory="4Gi"))
+    az.give(APP_T, "api", {"Replicas": flat(1, 1), "CpuPercentage": flat(8), "MemoryPercentage": flat(15)})
+    a = run(az, prices)["api"]
+    assert (a.verdict, a.proposal) == ("watch", None)
+    assert "RestartCount" in a.reason
+
+
+def test_missing_queue_telemetry_blocks_a_plan_downsize(prices: PriceClient) -> None:
+    az = az_with(plan("quiet", "P2v3"))
+    az.give(PLAN_T, "quiet", {"CpuPercentage": flat(8), "MemoryPercentage": flat(23)})
+    a = run(az, prices)["quiet"]
+    assert (a.verdict, a.proposal) == ("watch", None)
+    assert "HttpQueueLength" in a.reason
+
+
+def test_metrics_are_put_on_one_timestamp_grid() -> None:
+    def point(hour: int, value: float | None) -> dict[str, object]:
+        stamp = {"timeStamp": f"2026-11-06T{hour:02d}:00:00Z"}
+        return {**stamp, "maximum": value} if value is not None else stamp
+
+    payload: dict[str, object] = {
+        "value": [
+            {"name": {"value": "A"}, "timeseries": [{"data": [point(0, 1), point(1, 2), point(2, 3)]}]},
+            {"name": {"value": "B"}, "timeseries": [{"data": [point(0, 10), point(2, 30)]}]},  # hour 1 omitted
+        ]
+    }
+    parsed = parse_metrics(payload, ["Maximum"])
+    assert parsed["a"]["maximum"] == [1, 2, 3]
+    assert parsed["b"]["maximum"] == [10, None, 30]

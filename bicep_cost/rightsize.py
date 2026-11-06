@@ -51,6 +51,7 @@ class Stats:
     mean: float
     group: str = ""  # capacity this metric scales with ("cpu", "memory", "dtu"); empty: shown, not used to size
     trigger: bool = False  # a saturated value of this metric can make the resource `under`
+    required: bool = False  # shown, not sized on, but a verdict needs its coverage (it holds a contradicting signal)
 
     @property
     def hours(self) -> int:
@@ -88,10 +89,11 @@ def build_stats(
     unit: str = "%",
     group: str = "",
     trigger: bool = False,
+    required: bool = False,
 ) -> Stats:
     values = tuple(v for v in maxima if v is not None)
     means = [v for v in (averages or []) if v is not None] or list(values)
-    return Stats(name, unit, expected, values, sum(means) / len(means) if means else 0.0, group, trigger)
+    return Stats(name, unit, expected, values, sum(means) / len(means) if means else 0.0, group, trigger, required)
 
 
 @dataclass(frozen=True)
@@ -232,7 +234,7 @@ def decide(case: Case) -> Assessment:
     )
     if not sizing or all(m.hours == 0 for m in sizing):
         return d.done("no-data", case.insufficient or "Azure Monitor returned no data for the sizing metrics")
-    thin = [m for m in sizing if m.coverage < MIN_COVERAGE]
+    thin = [m for m in case.metrics if (m.group or m.required) and m.coverage < MIN_COVERAGE]
     if thin:
         worst = min(thin, key=lambda m: m.coverage)
         return d.done(
