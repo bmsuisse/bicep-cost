@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import sys
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -17,6 +18,9 @@ from bicep_cost.engine import DeploymentSettings, Engine
 from bicep_cost.prices import PriceClient, PriceError, build_filter, default_cache_dir, normalize_currency
 from bicep_cost.pricesheet import PriceSheet
 from bicep_cost.report import EstimateJson, render_csv, render_diff, render_json, render_markdown, render_text
+from bicep_cost.spikes import MAX_DAILY_DAYS, RETRY_WAITS, detect_spikes, resolve_scope, validate_window
+from bicep_cost.spikes import render_json as render_spikes_json
+from bicep_cost.spikes import render_text as render_spikes_text
 from bicep_cost.usage import UsageConfig
 
 
@@ -147,6 +151,49 @@ def build_parser() -> argparse.ArgumentParser:
         help="usage file to write ('-' for stdout; default: <params>.usage.toml or bicep-cost.usage.toml)",
     )
     collect.add_argument("--workers", type=int, default=8)
+
+    spikes = sub.add_parser(
+        "spikes",
+        help="find Azure cost spikes: recent daily cost vs the median of the days before",
+        description="Read-only: one Daily Cost Management query over the last --days days (max 31), grouped by one "
+        "dimension. Compares the mean of the last --recent complete days (today is excluded, its data is partial) "
+        "with the median of the days before and lists the groups that grew by at least --min-delta per day and "
+        "--ratio times, or that have no baseline at all (new). Needs `az login` with Cost Management Reader; the "
+        "Query API allows 4 requests per minute per scope.",
+    )
+    spikes.add_argument("--scope", help="full scope path, e.g. /subscriptions/<id>/resourceGroups/<rg>")
+    spikes.add_argument("--subscription-id", help="default: the az CLI's current subscription")
+    spikes.add_argument("--resource-group", help="narrow the subscription scope to one resource group")
+    spikes.add_argument(
+        "--group-by",
+        default="ServiceName",
+        help="cost dimension to group by, e.g. ServiceName, ResourceGroupName, ResourceId, MeterCategory "
+        "(default ServiceName; ResourceId needs a subscription or resource group scope)",
+    )
+    spikes.add_argument("--service", help="only this ServiceName (for a --group-by ResourceId drill-down)")
+    spikes.add_argument(
+        "--days",
+        type=_positive_int,
+        default=MAX_DAILY_DAYS,
+        help=f"window incl. baseline, 2..{MAX_DAILY_DAYS} (default 31)",
+    )
+    spikes.add_argument(
+        "--recent", type=_positive_int, default=3, help="complete days compared with the baseline (default 3)"
+    )
+    spikes.add_argument(
+        "--min-delta",
+        type=_nonnegative_number,
+        default=5.0,
+        help="minimum increase per day in the billing currency (default 5)",
+    )
+    spikes.add_argument(
+        "--ratio",
+        type=_nonnegative_number,
+        default=1.5,
+        help="recent must be at least this multiple of the baseline (default 1.5)",
+    )
+    spikes.add_argument("--cost-type", default="ActualCost", choices=["ActualCost", "AmortizedCost"])
+    spikes.add_argument("--json", action="store_true", help="machine-readable output")
 
     init = sub.add_parser(
         "init-usage", help="write a usage file listing every tunable value of a template with its default"
@@ -347,6 +394,25 @@ def _cmd_collect(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_spikes(args: argparse.Namespace) -> int:
+    validate_window(args.days, args.recent)
+    scope = resolve_scope(args.scope, args.subscription_id, args.resource_group)
+    report = detect_spikes(
+        http_transport(throttle_waits=RETRY_WAITS),
+        scope=scope,
+        today=datetime.now(UTC).date(),
+        group_by=args.group_by,
+        service=args.service,
+        days=args.days,
+        recent=args.recent,
+        min_delta=args.min_delta,
+        ratio=args.ratio,
+        cost_type=args.cost_type,
+    )
+    sys.stdout.write(render_spikes_json(report) if args.json else render_spikes_text(report))
+    return 0
+
+
 def _cmd_init_usage(args: argparse.Namespace) -> int:
     engine, source = _expand(args, "00000000-0000-0000-0000-000000000000", "rg-estimate")
     usage = UsageConfig()
@@ -402,6 +468,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "collect":
             return _cmd_collect(args)
+        if args.command == "spikes":
+            return _cmd_spikes(args)
         if args.command == "init-usage":
             return _cmd_init_usage(args)
         return _cmd_prices(args)
