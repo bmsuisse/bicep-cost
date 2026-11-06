@@ -269,6 +269,10 @@ def collect_cognitive(res: Resource, c: Collection) -> Collected:
     if finding is not None:
         out.findings.append(finding)
         return out
+    billing = next(iter({cur for _, cur in c.costs.values()}), None)
+    if billing and billing.upper() != "USD":  # the metric is in USD and no conversion happens
+        out.notes.append(f"no cost data; the estimated-cost metric is in USD but the billing currency is {billing}")
+        return out
     estimated = c.arm.metrics(res.id, "FoundryModelEstimatedCost", "Total", "P1D")
     total = _total(estimated)
     if total:

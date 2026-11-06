@@ -23,6 +23,7 @@ from bicep_cost.report import EstimateJson, render_csv, render_diff, render_json
 from bicep_cost.scan import (
     add_coverage_json,
     ambiguous_ids,
+    attach_known_disks,
     fetch_inventory,
     in_scope,
     reconcile,
@@ -472,6 +473,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     groups = tuple(args.resource_group)
     arm = ArmClient(http_transport(throttle_waits=RETRY_WAITS), days=args.days)
     resources, node_resources = without_aks_nodes(to_resources(fetch_inventory(arm, subscription, groups)))
+    attach_known_disks(resources)
     print(f"bicep-cost: {len(resources)} resources found in subscription {subscription}", file=sys.stderr)
     if node_resources:
         print(

@@ -130,7 +130,8 @@ def reconcile(estimate: Estimate, costs: dict[str, tuple[float, str]], window_da
         row.modelled += est.monthly
         row.actual += actual
         # resources of a managed service (Databricks / AKS nodes, ...) come and go: the bill is the truth
-        unmodelled = est.status in UNPRICED or (est.status == "priced" and est.monthly == 0)
+        # nothing modelled: no estimator, or one that returns no line items (usage-only types such as AI accounts)
+        unmodelled = est.status in (*UNPRICED, "free") or (est.status == "priced" and not est.items)
         managed = bool(res.body.get("managedBy")) and est.status == "priced" and key in costs
         if (actual > 0 and unmodelled) or managed:
             est.notes.append(f"{est.status}: priced from its actual cost instead of the model")
@@ -232,15 +233,45 @@ def add_coverage_json(text: str, cov: Coverage) -> str:
     return json.dumps(data, indent=2) + "\n"
 
 
+AKS_NODE_TYPES = ("microsoft.compute/virtualmachinescalesets", "microsoft.compute/virtualmachines")
+
+
 def without_aks_nodes(resources: list[Resource]) -> tuple[list[Resource], int]:
-    """Drop resources in AKS node resource groups: the cluster's estimate already prices its node pools."""
+    """Drop node VMs / scale sets in AKS node resource groups: the cluster's estimate already prices its node pools.
+
+    Load balancers, public IPs and volume disks of the node group stay: the cluster estimate does not cover them.
+    """
     node_groups = {
         (r.subscription_id.lower(), str(r.get("properties.nodeResourceGroup")).lower())
         for r in resources
         if r.type.lower() == "microsoft.containerservice/managedclusters" and r.get("properties.nodeResourceGroup")
     }
-    kept = [r for r in resources if (r.subscription_id.lower(), r.resource_group.lower()) not in node_groups]
+    kept = [
+        r
+        for r in resources
+        if r.type.lower() not in AKS_NODE_TYPES
+        or (r.subscription_id.lower(), r.resource_group.lower()) not in node_groups
+    ]
     return kept, len(resources) - len(kept)
+
+
+def attach_known_disks(resources: list[Resource]) -> None:
+    """Live VMs say ``FromImage`` for disks that are also listed as ``disks`` resources: price those only once."""
+    ids = {r.id.lower() for r in resources if r.type.lower() == "microsoft.compute/disks"}
+    for vm in resources:
+        if vm.type.lower() != "microsoft.compute/virtualmachines":
+            continue
+        storage = vm.get("properties.storageProfile")
+        if not isinstance(storage, dict):
+            continue
+        os_disk = storage.get("osDisk")
+        data_disks = storage.get("dataDisks")
+        disks = [os_disk] if isinstance(os_disk, dict) else []
+        disks += [d for d in data_disks if isinstance(d, dict)] if isinstance(data_disks, list) else []
+        for disk in disks:
+            managed = disk.get("managedDisk")
+            if isinstance(managed, dict) and str(managed.get("id", "")).lower() in ids:
+                disk["createOption"] = "Attach"
 
 
 def ambiguous_ids(resources: list[Resource]) -> set[str]:

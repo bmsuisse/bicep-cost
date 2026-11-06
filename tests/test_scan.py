@@ -8,9 +8,11 @@ from bicep_cost import cli
 from bicep_cost.armexpr import JsonValue
 from bicep_cost.calc import estimate_resources
 from bicep_cost.collect.arm import ArmClient, AzureError
+from bicep_cost.engine import Resource
 from bicep_cost.prices import PriceClient
 from bicep_cost.scan import (
     ambiguous_ids,
+    attach_known_disks,
     fetch_inventory,
     in_scope,
     reconcile,
@@ -263,9 +265,13 @@ def test_resources_of_aks_node_groups_are_left_to_the_cluster_estimate() -> None
         f"/subscriptions/{SUB}/resourceGroups/mc_rg-a_aks_westeurope/providers/Microsoft.Compute/virtualMachineScaleSets/pool1",
         "Microsoft.Compute/virtualMachineScaleSets",
     )
-    kept, skipped = without_aks_nodes(to_resources([cluster, nodes, PLAN_ROW]))
-    assert skipped == 1
-    assert [r.name for r in kept] == ["aks", "plan1"]
+    balancer = row(
+        f"/subscriptions/{SUB}/resourceGroups/mc_rg-a_aks_westeurope/providers/Microsoft.Network/loadBalancers/kubernetes",
+        "Microsoft.Network/loadBalancers",
+    )
+    kept, skipped = without_aks_nodes(to_resources([cluster, nodes, balancer, PLAN_ROW]))
+    assert skipped == 1  # node compute only: the load balancer is not part of the cluster estimate
+    assert [r.name for r in kept] == ["aks", "kubernetes", "plan1"]
 
 
 def test_scan_rejects_a_usage_file_in_another_currency(
@@ -276,3 +282,58 @@ def test_scan_rejects_a_usage_file_in_another_currency(
     code = cli.main(["scan", "--currency", "USD", "--usage", str(usage)])
     assert code == 1
     assert "currency conversion is not supported" in capsys.readouterr().err
+
+
+def create_options(vm: Resource) -> list[object]:
+    storage = vm.get("properties.storageProfile")
+    assert isinstance(storage, dict)
+    os_disk, data = storage["osDisk"], storage["dataDisks"]
+    assert isinstance(os_disk, dict)
+    assert isinstance(data, list)
+    return [os_disk["createOption"], *(d["createOption"] for d in data if isinstance(d, dict))]
+
+
+def test_disks_listed_in_the_inventory_are_not_priced_again_by_their_vm() -> None:
+    disk_id = f"/subscriptions/{SUB}/resourceGroups/rg-a/providers/Microsoft.Compute/disks/vm1_OsDisk"
+    vm = row(
+        f"/subscriptions/{SUB}/resourceGroups/rg-a/providers/Microsoft.Compute/virtualMachines/vm1",
+        "Microsoft.Compute/virtualMachines",
+        properties={
+            "storageProfile": {
+                "osDisk": {"createOption": "FromImage", "managedDisk": {"id": disk_id}},
+                "dataDisks": [
+                    {"createOption": "Empty", "managedDisk": {"id": disk_id.replace("OsDisk", "unknown")}},
+                    {"createOption": "Empty", "managedDisk": {"id": disk_id}},
+                ],
+            }
+        },
+    )
+    resources = to_resources([vm, row(disk_id, "Microsoft.Compute/disks")])
+    attach_known_disks(resources)
+    assert create_options(resources[0]) == ["Attach", "Empty", "Attach"]
+
+
+def test_free_estimates_with_a_billing_row_are_priced_from_the_bill(prices: PriceClient) -> None:
+    nic_id = f"/subscriptions/{SUB}/resourceGroups/rg-a/providers/Microsoft.Network/networkInterfaces/nic"
+    estimate = estimate_resources(
+        to_resources([row(nic_id, "Microsoft.Network/networkInterfaces")]), prices, UsageConfig()
+    )
+    assert estimate.resources[0].status == "free"
+    reconcile(estimate, costs_of((12.0, nic_id)), DAYS)
+    assert estimate.monthly == pytest.approx(12 * FACTOR)
+
+
+def test_an_explicit_zero_estimate_is_kept(prices: PriceClient) -> None:
+    account_id = f"/subscriptions/{SUB}/resourceGroups/rg-a/providers/Microsoft.Storage/storageAccounts/st1"
+    account = row(
+        account_id,
+        "Microsoft.Storage/storageAccounts",
+        location="westeurope",
+        kind="StorageV2",
+        sku={"name": "Standard_LRS"},
+    )
+    zero = {"stored_gb": 0, "write_operations_10k": 0, "read_operations_10k": 0, "other_operations_10k": 0}
+    estimate = estimate_resources(to_resources([account]), prices, UsageConfig({"storage": {"st1": zero}}))
+    assert estimate.resources[0].items  # modelled, and the model says zero
+    reconcile(estimate, costs_of((500.0, account_id)), DAYS)
+    assert estimate.monthly < 500
