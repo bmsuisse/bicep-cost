@@ -7,6 +7,7 @@ import pytest
 
 from bicep_cost import rightsize_report
 from bicep_cost.armexpr import JsonValue
+from bicep_cost.collect.arm import ArmClient
 from bicep_cost.prices import PriceClient
 from bicep_cost.rightsize import (
     SUSTAINED_AVG,
@@ -17,18 +18,22 @@ from bicep_cost.rightsize import (
     build_stats,
     decide,
 )
+from bicep_cost.rightsize_run import analyse
 from tests.test_rightsize import (
     APP_T,
     DAYS,
     HOURS,
+    NOW,
     PLAN_T,
     SQL_T,
+    SUB,
     Azure,
     Series,
     az_with,
     candidate,
     capp,
     case,
+    first_hours,
     flat,
     hourly,
     plan,
@@ -302,3 +307,51 @@ def test_the_report_carries_the_sustained_thresholds_and_evidence(
     assert metric["hours_avg_at_least_sustained"] == HOURS
     assert metric["peak_hourly_average"] == 100.0
     assert json.dumps(metric)
+
+
+def test_missing_hourly_averages_block_the_sustained_proof() -> None:
+    maxima = peaks(HOURS // 2)
+    assert decide(under_case(saturated(maxima, hot_hours(HOURS // 2)))).verdict == "under"
+    partial: list[float | None] = [*[97.0] * (HOURS // 2), *[None] * (HOURS // 2)]  # 360 saturated hours, 360 averages
+    assert decide(under_case(saturated(maxima, partial))).verdict == "watch"
+
+
+def test_gaps_below_the_coverage_limit_are_still_shown(prices: PriceClient) -> None:
+    cpu = saturated([None] * 36 + [20.0] * (HOURS - 36), [None] * 36 + [10.0] * (HOURS - 36))
+    result = decide(case([cpu]))
+    assert any("684 of 720 hourly points" in n and "first 36 h" in n for n in result.notes)
+
+
+def scale_to_zero(running: int) -> Series:
+    saturated_hours = {"maximum": first_hours(running, 99, None), "average": first_hours(running, 97, None)}
+    replicas = {"maximum": first_hours(running, 1, 0), "average": first_hours(running, 1, 0)}
+    return {
+        "Replicas": replicas,
+        "CpuPercentage": saturated_hours,
+        "MemoryPercentage": {"maximum": first_hours(running, 30, None), "average": first_hours(running, 30, None)},
+        "RestartCount": flat(0),
+    }
+
+
+def test_a_scale_to_zero_app_needs_the_sustained_share_of_the_whole_window(prices: PriceClient) -> None:
+    """Running hours are the denominator of coverage, never of the sustained share: 170 saturated h of 720 are 24%."""
+    az = az_with(
+        capp("short", cpu=1, memory="2Gi", min_r=0, max_r=1), capp("long", cpu=1, memory="2Gi", min_r=0, max_r=1)
+    )
+    az.give(APP_T, "short", scale_to_zero(170))
+    az.give(APP_T, "long", scale_to_zero(200))
+    result = run(az, prices)
+    assert result["short"].verdict == "watch"
+    assert "not sustained" in result["short"].reason
+    assert result["long"].verdict == "under"
+    assert "170" not in result["long"].reason
+    assert "200 of 720 h" in result["long"].reason
+
+
+def test_markdown_carries_the_notes_of_not_sure_resources(prices: PriceClient) -> None:
+    az = dtu_db("srv/bursty")
+    az.give(SQL_T, "srv/bursty", dtu_series(nightly(92, 3), log_write_percent=nightly(92, 3)))
+    report = analyse(ArmClient(az, days=DAYS, now=NOW), prices, SUB, ())
+    md = rightsize_report.render_markdown(report, rightsize_report.select(report))
+    assert "log IO is at or above 95% in 90 h" in md
+    assert "scale up only around the busy hours" in md

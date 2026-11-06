@@ -198,11 +198,15 @@ def render_markdown(report: Report, sel: Selection) -> str:
             p = a.proposal
             assert p is not None
             out += ["", f"**{a.name}**: {a.reason}", "", f"- risk: {p.risk}", f"- rollback: `{p.rollback}`"]
+            out += [f"- note: {n}" for n in a.notes]
             out += [f"- Advisor {r.category}/{r.impact}: {r.problem}" for r in a.advisor]
     others = [a for a in sel.shown if not a.proposal and a.verdict != "ok"]
     if others:
         out += ["", "### Not sure enough to propose", "", "| Verdict | Resource | SKU | Why |", "|---|---|---|---|"]
         out += [f"| {a.verdict} | `{a.name}` ({a.resource_group}) | {a.sku} | {a.reason} |" for a in others]
+        for a in others:
+            if a.notes:
+                out += ["", f"**{a.name}**:", *[f"- {n}" for n in a.notes]]
     oks = [a for a in sel.shown if a.verdict == "ok"]
     if oks:
         out += ["", f"### OK ({len(oks)})", ""]

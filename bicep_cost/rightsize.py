@@ -61,6 +61,7 @@ class Stats:
     required: bool = False  # shown, not sized on, but a verdict needs its coverage (it holds a contradicting signal)
     averages: tuple[float, ...] = ()  # the hourly averages that came back (empty when not read)
     gaps: tuple[int, int, int] | None = None  # (before the first point, between points, after the last) in hours
+    span: int = 0  # hours of the whole window when ``expected`` counts fewer (a scale-to-zero app's running hours)
 
     @property
     def hours(self) -> int:
@@ -96,13 +97,18 @@ class Stats:
         return max(self.averages, default=0.0)
 
     @property
+    def window(self) -> int:
+        return self.span or self.expected
+
+    @property
+    def complete(self) -> bool:
+        """Every expected hourly point came back, maxima and averages."""
+        return self.expected > 0 and self.hours >= self.expected and len(self.averages) >= self.expected
+
+    @property
     def sustained(self) -> bool:
-        """The hourly average was saturated in a large share of the expected hours, and every hour came back."""
-        return (
-            bool(self.expected)
-            and self.hours >= self.expected
-            and self.avg_hours_at_least(SUSTAINED_AVG) / self.expected >= SUSTAINED_SHARE
-        )
+        """The hourly average was saturated in a large share of the whole window; every hourly point came back."""
+        return self.complete and self.avg_hours_at_least(SUSTAINED_AVG) / self.window >= SUSTAINED_SHARE
 
     def missing(self) -> str:
         """Where the hours that did not come back are (empty when nothing is missing or the positions are unknown)."""
@@ -130,6 +136,8 @@ def build_stats(
     group: str = "",
     trigger: bool = False,
     required: bool = False,
+    span: int = 0,
+    positions: bool = True,
 ) -> Stats:
     values = tuple(v for v in maxima if v is not None)
     avgs = tuple(v for v in (averages or []) if v is not None)
@@ -144,7 +152,8 @@ def build_stats(
         trigger,
         required,
         avgs,
-        _gaps(maxima) if len(maxima) == expected else None,
+        _gaps(maxima) if positions and len(maxima) == expected else None,
+        span,
     )
 
 
@@ -305,6 +314,9 @@ def decide(case: Case) -> Assessment:
         )
     if case.insufficient:
         return d.done("watch", case.insufficient)
+    d.extra_notes += [
+        f"{m.name}: {m.hours} of {m.expected} hourly points came back ({m.missing()})" for m in sizing if m.missing()
+    ]
     hot = [m for m in sizing if m.trigger and m.hot]
     if hot:
         sustained = [m for m in hot if case.window_days >= FULL_CYCLE_DAYS and m.sustained]
@@ -330,8 +342,8 @@ def _character(m: Stats) -> str:
     """How the saturation looks: the hourly *average* shows whether it was sustained or only peaks inside the hours."""
     hours = m.avg_hours_at_least(SUSTAINED_AVG)
     return (
-        f"hourly average at or above {SUSTAINED_AVG:.0f}% in {hours} of {m.expected} h "
-        f"({hours / max(m.expected, 1):.0%}), highest {m.peak_average:.0f}%, mean {m.mean:.0f}%"
+        f"hourly average at or above {SUSTAINED_AVG:.0f}% in {hours} of {m.window} h "
+        f"({hours / max(m.window, 1):.0%}), highest {m.peak_average:.0f}%, mean {m.mean:.0f}%"
     )
 
 
@@ -347,7 +359,7 @@ def _bursty_note(m: Stats) -> str:
 def _watch_hot(d: _Decision, hot: list[Stats]) -> Assessment:
     case = d.case
     what = "; ".join(f"{_fmt(m)} [{_character(m)}]" if m.averages else _fmt(m) for m in hot)
-    complete = case.window_days >= FULL_CYCLE_DAYS and all(m.hours >= m.expected for m in hot)
+    complete = case.window_days >= FULL_CYCLE_DAYS and all(m.complete for m in hot)
     proof = (
         f"not sustained (an hourly average of {SUSTAINED_AVG:.0f}% in {SUSTAINED_SHARE:.0%} of the hours would be)"
         if complete
