@@ -186,8 +186,14 @@ class ArmClient:
         rows = tables[0].get("Rows")
         return [r for r in rows if isinstance(r, list)] if isinstance(rows, list) else []
 
-    def costs_by_resource(self, subscription_id: str, resource_group: str) -> dict[str, tuple[float, str]]:
-        """Actual cost of the window per lower-cased resource id, with the billing currency."""
+    def costs_by_resource(
+        self, subscription_id: str, resource_group: str | None = None
+    ) -> dict[str, tuple[float, str]]:
+        """Actual cost of the window per lower-cased resource id, with the billing currency.
+
+        Without a resource group the whole subscription is queried (one call instead of one per group, which matters
+        for the Query API's per-minute quota).
+        """
         body: dict[str, object] = {
             "type": "ActualCost",
             "timeframe": "Custom",
@@ -198,21 +204,25 @@ class ArmClient:
                 "grouping": [{"type": "Dimension", "name": "ResourceId"}],
             },
         }
-        path = (
-            f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.CostManagement/query"
-        )
-        payload = self.post(path, "2023-11-01", body)
-        props = payload.get("properties") if payload else None
-        if not isinstance(props, dict):
-            return {}
-        columns = [c.get("name") for c in props.get("columns", []) if isinstance(c, dict)]
+        scope = f"/subscriptions/{subscription_id}" + (f"/resourceGroups/{resource_group}" if resource_group else "")
+        url: str | None = f"{ARM}{scope}/providers/Microsoft.CostManagement/query?api-version=2023-11-01"
         out: dict[str, tuple[float, str]] = {}
-        try:
-            i_cost, i_id, i_cur = columns.index("Cost"), columns.index("ResourceId"), columns.index("Currency")
-        except ValueError:
-            return {}
-        for row in props.get("rows", []):
-            out[str(row[i_id]).lower()] = (float(row[i_cost]), str(row[i_cur]))
+        while url:
+            payload = self.transport("POST", url, body)
+            props = payload.get("properties") if payload else None
+            if not isinstance(props, dict):
+                break
+            columns = [c.get("name") for c in props.get("columns", []) if isinstance(c, dict)]
+            try:
+                i_cost, i_id, i_cur = columns.index("Cost"), columns.index("ResourceId"), columns.index("Currency")
+            except ValueError:
+                break
+            for row in props.get("rows", []):
+                key = str(row[i_id]).lower()
+                prev = out.get(key, (0.0, ""))[0]
+                out[key] = (prev + float(row[i_cost]), str(row[i_cur]))
+            next_link = props.get("nextLink")
+            url = next_link if isinstance(next_link, str) and next_link else None
         return out
 
 

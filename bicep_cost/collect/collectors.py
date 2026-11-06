@@ -269,6 +269,10 @@ def collect_cognitive(res: Resource, c: Collection) -> Collected:
     if finding is not None:
         out.findings.append(finding)
         return out
+    billing = next(iter({cur for _, cur in c.costs.values()}), None)
+    if billing and billing.upper() != "USD":  # the metric is in USD and no conversion happens
+        out.notes.append(f"no cost data; the estimated-cost metric is in USD but the billing currency is {billing}")
+        return out
     estimated = c.arm.metrics(res.id, "FoundryModelEstimatedCost", "Total", "P1D")
     total = _total(estimated)
     if total:
@@ -484,17 +488,25 @@ SECTION_OF_TYPE = {
 }
 
 
-def collect_all(resources: list[Resource], arm: ArmClient, workers: int = 8) -> CollectionResult:
+def collect_all(
+    resources: list[Resource],
+    arm: ArmClient,
+    workers: int = 8,
+    costs: dict[str, tuple[float, str]] | None = None,
+    skip_ids: frozenset[str] = frozenset(),
+) -> CollectionResult:
+    """Measure every resource with a collector (except ``skip_ids``); ``costs`` skips the per-group cost query."""
     index = ResourceIndex(resources)
-    costs: dict[str, tuple[float, str]] = {}
     warnings: list[str] = []
-    for sub, rg in sorted({(r.subscription_id, r.resource_group) for r in resources}):
-        try:
-            costs.update(arm.costs_by_resource(sub, rg))
-        except AzureError as exc:
-            warnings.append(f"cost data for {rg} unavailable: {exc}")
+    if costs is None:
+        costs = {}
+        for sub, rg in sorted({(r.subscription_id, r.resource_group) for r in resources}):
+            try:
+                costs.update(arm.costs_by_resource(sub, rg))
+            except AzureError as exc:
+                warnings.append(f"cost data for {rg} unavailable: {exc}")
     collection = Collection(arm, index, costs)
-    targets = [r for r in resources if r.type.lower() in COLLECTORS]
+    targets = [r for r in resources if r.type.lower() in COLLECTORS and r.id.lower() not in skip_ids]
 
     def run(res: Resource) -> tuple[Resource, Collected | None, str | None]:
         try:

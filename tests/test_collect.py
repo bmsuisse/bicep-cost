@@ -208,6 +208,23 @@ def test_costs_drive_session_pools_and_cognitive_accounts(az: FakeAzure) -> None
     assert result.cost_currency == "EUR"
 
 
+def test_usd_cost_metric_is_not_used_when_the_bill_is_in_another_currency(az: FakeAzure) -> None:
+    ai = make_resource("Microsoft.CognitiveServices/accounts", "ai", {"location": "westeurope"})
+    other = make_resource("Microsoft.CognitiveServices/accounts", "billed", {"location": "westeurope"})
+    az.on(
+        "CostManagement/query",
+        {
+            "properties": {
+                "columns": [{"name": "Cost"}, {"name": "ResourceId"}, {"name": "Currency"}],
+                "rows": [[60.0, other.id, "EUR"]],
+            }
+        },
+    )
+    az.on("FoundryModelEstimatedCost", metric([({}, [100.0])]))
+    result = collect_all([ai, other], arm(az))
+    assert {f.name for f in result.findings if f.key == "monthly_cost"} == {"billed"}
+
+
 def test_one_failing_resource_becomes_a_warning_not_a_crash(az: FakeAzure) -> None:
     az.on("resourceGroups/rg/providers/Microsoft.Storage/storageAccounts/bad", AzureError("HTTP 403"))
     result = collect_all([storage("bad"), storage("ok")], arm(az))

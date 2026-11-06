@@ -2,7 +2,10 @@ import pytest
 
 from bicep_cost.armexpr import JsonValue
 from bicep_cost.calc import estimate_resources
+from bicep_cost.context import UnresolvedError
 from bicep_cost.engine import Resource
+from bicep_cost.estimators.appservice import parse_plan_sku
+from bicep_cost.estimators.sql import parse_sku
 from bicep_cost.estimators.vm import disk_label
 from bicep_cost.model import Estimate
 from bicep_cost.prices import PriceClient
@@ -233,3 +236,42 @@ def test_postgres_backup_above_free_allowance(prices: PriceClient) -> None:
     )
     est = run(prices, [pg], {"postgres": {"pg": {"backup_storage_gb": 52}}})
     assert est.monthly == pytest.approx(0.424 * HOURS + 32 * 0.1369 + 20 * 0.103)
+
+
+def live_db(name: str, capacity: int, **extra: JsonValue) -> Resource:
+    """A database as Resource Graph / the ARM GET returns it: tier name + capacity instead of ``S1`` / ``GP_Gen5_2``."""
+    sku: dict[str, JsonValue] = {"name": name, "capacity": capacity, **extra}
+    return make_resource("Microsoft.Sql/servers/databases", "srv/db", {"location": "westeurope", "sku": sku})
+
+
+def test_live_vcore_sku_is_name_plus_capacity(prices: PriceClient) -> None:
+    live = run(prices, [live_db("GP_Gen5", 2, family="Gen5", tier="GeneralPurpose")])
+    template = run(prices, [db("GP_Gen5_2")])
+    assert live.resources[0].status == "priced"
+    assert live.monthly == pytest.approx(template.monthly)
+
+
+def test_live_dtu_sku_maps_dtu_count_to_level(prices: PriceClient) -> None:
+    assert parse_sku("Standard", 20).dtu_label == "S1"
+    assert parse_sku("Premium", 125).dtu_label == "P1"
+    with pytest.raises(UnresolvedError):
+        parse_sku("Standard", 33)
+
+
+def test_system_database_is_free(prices: PriceClient) -> None:
+    est = run(prices, [live_db("GP_SYSTEM", 4, family="SYSTEM", tier="GeneralPurpose")])
+    assert est.resources[0].status == "free"
+
+
+@pytest.mark.parametrize(
+    ("sku", "label"),
+    [
+        ("P1v3", "P1 v3"),
+        ("P3v3", "P3 v3"),
+        ("P0v3", "P0v3"),
+        ("P1mv3", "P1mv3"),
+        ("P2v4", "P2v4"),
+    ],
+)
+def test_premium_plan_label_matches_price_list(sku: str, label: str) -> None:
+    assert parse_plan_sku(sku).label == label

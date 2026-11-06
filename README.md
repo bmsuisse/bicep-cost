@@ -126,7 +126,7 @@ default = 0
 | Container Apps | `managedEnvironments`, `containerApps`, `sessionPools` | Consumption profile (active/idle rates, free grants, KEDA cron schedules), dedicated profiles D4-D32 / E4-E32 (+ plan management fee), dynamic sessions (Python/Node) and custom-container pools |
 | Storage | `storageAccounts`, file `shares` | LRS / ZRS / GRS / RA-GRS / GZRS / RA-GZRS; Hot / Cool / Cold; Blob, ADLS Gen2 (HNS), standard file shares (TransactionOptimized / Hot / Cool). **Not** Premium |
 | PostgreSQL | `flexibleServers` | Burstable, General Purpose, Memory Optimized (any series); HA doubles compute + storage; Premium SSD v2 IOPS / throughput; backup storage above the free allowance (geo-redundant aware) |
-| Azure SQL | `servers/databases`, `servers/elasticPools`, `managedInstances` | vCore: General Purpose (provisioned and serverless), Business Critical, Hyperscale (+ HA replicas), zone redundancy, Gen5 / DC / Fsv2 / M families; DTU: Basic, Standard S0-S12, Premium P1-P15; DTU elastic pools; Managed Instance GP / BC. Databases in a pool are included. Usage keys use the full name `server/database`. Azure Hybrid Benefit is not applied (price shown includes the license). **Not** Synapse dedicated pools, LTR backups |
+| Azure SQL | `servers/databases`, `servers/elasticPools`, `managedInstances` | vCore: General Purpose (provisioned and serverless), Business Critical, Hyperscale (+ HA replicas), zone redundancy, Gen5 / DC / Fsv2 / M families; DTU: Basic, Standard S0-S12, Premium P1-P15; DTU elastic pools; Managed Instance GP / BC. Databases in a pool are included. Usage keys use the full name `server/database`. Azure Hybrid Benefit is not applied (price shown includes the license). Live SKUs as returned by Azure (`Standard` + capacity, `GP_S_Gen5` + capacity) are understood too. **Not** Synapse dedicated pools, LTR backups |
 | Virtual machines | `virtualMachines`, `virtualMachineScaleSets`, `disks`, `publicIPAddresses` | any VM size (by `armSkuName`), Linux / Windows / Hybrid Benefit, Spot; OS + data disks (Premium / Standard SSD / Standard HDD, LRS / ZRS, tier from size); ephemeral OS disks free; VMSS = instances x VM (set `instances` for autoscale). **Not** Ultra / Premium SSD v2 disks, SQL / RHEL / SUSE license surcharges, load balancers, gateways |
 | Service Bus | `namespaces` | Basic, Standard (base fee + tiered operations, first 13 M included), Premium (1/2/4/8/16 messaging units) |
 | Monitoring | `workspaces`, `components`, `scheduledQueryRules` | PerGB2018 (free 5 GB, tiers), commitment tiers, retention > 31 d. **Not** Basic/Auxiliary table plans |
@@ -141,6 +141,37 @@ prices** unless you add `[discounts]` or opt into account price sheets (below).
 
 Add a resource type by writing `estimate_x(res, ctx) -> ResourceEstimate` in `bicep_cost/estimators/` and registering it
 in `estimators/__init__.py`.
+
+## Scan a deployed subscription
+
+No template needed: `scan` lists what is deployed with Azure Resource Graph and prices it with the same estimators.
+
+```bash
+az login
+bicep-cost scan                                   # current subscription, list prices, default usage assumptions
+bicep-cost scan --actuals                         # + compare with the Cost Management bill per resource type
+bicep-cost scan --measure --days 30 --save-usage prod.usage.toml   # + measure usage from Azure Monitor (implies --actuals)
+bicep-cost scan --subscription-id <id> --resource-group rg-a --resource-group rg-b --format markdown
+```
+
+Everything is read-only (Resource Graph and Cost Management queries, Azure Monitor / Log Analytics reads). Needs Reader;
+`--actuals` also Cost Management Reader.
+
+With `--actuals` the report ends with a **coverage table** per resource type: what the estimators priced (*modelled*)
+against the actual cost of the window scaled to a month, how many resources had to be priced from the bill, and the
+cost of resource ids that are no longer in the inventory (deleted, or short-lived nodes of managed services):
+
+- Resource types **without an estimator** (or that could not be priced) are priced from their actual cost instead of
+  being dropped, so the total stays complete. Never done without `--actuals`.
+- Resources that belong to a managed service (`managedBy`, e.g. Databricks cluster nodes) come and go with the
+  workload; they are priced from their actual cost instead of a 24/7 assumption.
+- *Modelled / actual* far from 100% points at a gap: usage defaults for storage / logs / AI (use `--measure`),
+  negotiated discounts or reservations (use `--azure-prices` or `[discounts]`), or a modelling error worth an issue.
+- The estimate uses the billing currency of the actuals; `--currency` must match, no conversion happens.
+
+`--baseline` / `--fail-above` / `--format json` work as for `estimate`; the JSON gains a `coverage` object.
+Resource Graph does not list child resources such as file shares and lags a few minutes behind ARM. Cost Management
+allows few queries per minute; throttled calls are retried automatically.
 
 ## Other commands and flags
 
