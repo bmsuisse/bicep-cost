@@ -131,10 +131,39 @@ bicep-cost estimate ... --fail-above 1500              # exit 3 above a monthly 
 bicep-cost estimate ... --strict                       # exit 2 if something could not be priced
 bicep-cost estimate ... --group-by type|module         # summary table instead of per-resource rows
 bicep-cost prices --service "Azure Container Apps" --meter-contains Idle   # browse meters
+bicep-cost spikes                                      # Azure cost spikes of the last days (needs az login)
 ```
 
 Other options: `--location` (default region and `resourceGroup().location`, default `westeurope`), `--resource-group`,
 `--subscription-id`, `--offline` / `--refresh` / `--no-cache`, `-v` (log API calls).
+
+## Find cost spikes
+
+```bash
+az login
+bicep-cost spikes                                          # current az subscription, grouped by ServiceName
+bicep-cost spikes --resource-group rg-prod                 # narrow the scope
+bicep-cost spikes --group-by ResourceId --service Storage  # drill into one service
+bicep-cost spikes --days 14 --recent 2 --min-delta 20 --ratio 2 --json
+```
+
+`spikes` answers "why did the bill jump?" from actual billing data. It runs **one** Daily Cost Management query over
+the last `--days` days (default and maximum 31, the Daily ceiling), grouped by one dimension (`--group-by`, default
+`ServiceName`; `ResourceGroupName`, `ResourceId`, `MeterCategory` ... work too, `ResourceId` needs a subscription or
+resource group scope). For every group it compares the mean daily cost of the last `--recent` complete days (default 3)
+with the median of the days before. Today is excluded because its cost data is partial. A group is flagged when:
+
+- the increase is at least `--min-delta` per day in the billing currency (default 5), **and**
+- the recent mean is at least `--ratio` times the baseline median (default 1.5), or the group had no cost at all in the
+  baseline (shown as `new`; `n/a` if the median is zero but there were a few cost days).
+
+Flagged groups are sorted by the absolute increase per day. `--json` prints the spikes with their last days of daily
+cost plus the total per day. Other options: `--cost-type ActualCost|AmortizedCost`, `--scope` (any full scope path,
+instead of `--subscription-id` / `--resource-group`).
+
+`spikes` is **read-only** (a single POST to the Cost Management `query` API) and needs **Cost Management Reader** on
+the scope. The Query API allows about 4 requests per minute per scope, so a 429 is retried after 15, 30 and 60 seconds
+(at most 3 times) before the command fails; avoid running it in a loop.
 
 ## Development
 

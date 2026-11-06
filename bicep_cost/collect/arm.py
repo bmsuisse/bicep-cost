@@ -1,18 +1,21 @@
 """Minimal read-only Azure Resource Manager / Azure Monitor client (bearer token from the Azure CLI)."""
 
 import json
+import logging
 import subprocess
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, TypedDict
 
 ARM = "https://management.azure.com"
 METRICS_API = "2023-10-01"
+
+log = logging.getLogger(__name__)
 
 
 class AzureError(Exception):
@@ -49,7 +52,15 @@ def az_current_subscription() -> str:
     return proc.stdout.strip()
 
 
-def http_transport(token_provider: Callable[[], str] = az_access_token) -> Transport:
+def http_transport(
+    token_provider: Callable[[], str] = az_access_token, throttle_waits: Sequence[float] | None = None
+) -> Transport:
+    """Transport over urllib with the Azure CLI's bearer token.
+
+    By default a 429 is retried like any other transient error (short exponential backoff). With `throttle_waits`
+    a 429 is instead retried after exactly those waits (seconds, at least the server's Retry-After) and the call
+    fails once they are used up; for APIs with a per-minute quota such as Cost Management queries.
+    """
     token = token_provider()
 
     def call(method: str, url: str, body: dict[str, object] | None) -> dict[str, object] | None:
@@ -60,6 +71,7 @@ def http_transport(token_provider: Callable[[], str] = az_access_token) -> Trans
             "User-Agent": "bicep-cost/0.1",
         }
         last: Exception | None = None
+        throttled = 0
         for attempt in range(6):
             request = urllib.request.Request(url, data=data, headers=headers, method=method)
             try:
@@ -73,7 +85,18 @@ def http_transport(token_provider: Callable[[], str] = az_access_token) -> Trans
                     detail = exc.read().decode(errors="replace")[:300]
                     raise AzureError(f"{method} {url.split('?')[0]} -> HTTP {exc.code}: {detail}") from exc
                 retry_after = exc.headers.get("Retry-After")
-                time.sleep(float(retry_after) if retry_after and retry_after.isdigit() else 2**attempt)
+                retry_after_s = float(retry_after) if retry_after and retry_after.isdigit() else None
+                if exc.code == 429 and throttle_waits is not None:
+                    if throttled >= len(throttle_waits):
+                        raise AzureError(
+                            f"{method} {url.split('?')[0]} -> HTTP 429: still throttled after {throttled} retries"
+                        ) from exc
+                    wait = max(throttle_waits[throttled], retry_after_s or 0)
+                    throttled += 1
+                    log.warning("HTTP 429 from %s, waiting %gs", url.split("?")[0], wait)
+                    time.sleep(wait)
+                    continue
+                time.sleep(retry_after_s if retry_after_s is not None else 2**attempt)
             except (urllib.error.URLError, TimeoutError) as exc:
                 last = exc
                 time.sleep(2**attempt)
