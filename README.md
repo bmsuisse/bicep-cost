@@ -311,13 +311,18 @@ NOT COVERED (no right-sizing rules; never guessed): microsoft.compute/virtualmac
 | `over`: never | Burstable, serverless, Consumption / Flex, elastic or autoscale-managed resources, read replicas, resources with a contradicting signal or Advisor Performance recommendation, and anything that cannot be priced (`watch`) |
 | `over`: replicas / instances | one fewer, only if the minimum stays >= 2 for zone-redundant (or unknown) setups; Container Apps only when replicas never scaled beyond the minimum |
 | `under`: saturation | p95 of the hourly maxima >= 85%, **or** at least 2% of the hours at >= 95% (a single spike does not count) |
-| `under`: second signal (at least one) | restarts, replicas at the maximum for >= 25% of the hours, connections >= 90% of `max_connections` or exhausted CPU credits (PostgreSQL), worker threads or a DTU component at the limit (SQL), HTTP queue >= 10 (App Service), or an Advisor Performance recommendation |
+| `under`: second signal (at least one), each over >= 2% of the expected hours | container restarts (the cumulative `RestartCount` went up), replicas at the maximum for >= 25% of the hours, connections >= 90% of `max_connections` or exhausted CPU credits (PostgreSQL), worker threads or a DTU component at the limit (SQL), HTTP queue >= 10 (App Service), or an Advisor Performance recommendation |
 | `under`: proposal | the smallest larger step of the same family whose predicted load is <= 70% / 85%; none fits: `under` without a proposal |
 | Anything between the thresholds | `ok`; saturation without a second signal: `watch` |
 
 Storage is shown but never judged or shrunk, and a smaller size is only proposed within the same family (App Service
 P0v3..P3v3, PostgreSQL D / E series, SQL DTU levels and Gen5 vCores that still hold the configured maximum size,
-Container Apps Consumption sizes). A saturated but mostly idle resource (mean < 25%) is flagged as bursty.
+Container Apps Consumption sizes, up to 4 vCPU on workload-profile environments and 2 on legacy ones). A saturated but
+mostly idle resource (mean < 25%) is flagged as bursty. SQL vCore databases: CPU and worker threads scale with the
+vCores, data and log IO limits do not scale linearly, so a smaller size is judged with the linear ratio (which
+overstates its load) and a larger size is assumed to bring no IO relief; databases configured above 1 TB are never
+shrunk. Container Apps also need the `Replicas` metric to be complete, so scale-to-zero hours are never confused with
+missing data.
 
 ### What is covered, and what is not
 

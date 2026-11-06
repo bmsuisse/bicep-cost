@@ -200,6 +200,12 @@ def render_markdown(report: Report, sel: Selection) -> str:
     if oks:
         out += ["", f"### OK ({len(oks)})", ""]
         out += [f"- `{a.name}` {a.sku}: {a.reason}" for a in oks]
+    if report.skipped:
+        out += ["", f"### Not assessed ({len(report.skipped)})", ""]
+        out += [f"- `{s.name}` ({s.type}, {s.resource_group}): {s.reason}" for s in report.skipped]
+    if report.warnings:
+        out += ["", "### Warnings", ""]
+        out += [f"- {w}" for w in report.warnings]
     if report.not_covered:
         out += [
             "",

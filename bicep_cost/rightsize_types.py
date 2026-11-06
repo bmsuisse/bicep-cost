@@ -9,6 +9,7 @@ import dataclasses
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from itertools import pairwise
 
 from bicep_cost.advisor import AdvisorRec
 from bicep_cost.armexpr import JsonValue
@@ -19,7 +20,7 @@ from bicep_cost.estimators.aca import parse_memory_gib
 from bicep_cost.estimators.appservice import parse_plan_sku
 from bicep_cost.estimators.sql import parse_sku as parse_sql_sku
 from bicep_cost.prices import PriceClient, PriceError
-from bicep_cost.rightsize import HOT_SHARE, PINNED_SHARE, Candidate, Case, Signal, Stats, build_stats
+from bicep_cost.rightsize import HOT_SHARE, MIN_COVERAGE, PINNED_SHARE, Candidate, Case, Signal, Stats, build_stats
 from bicep_cost.usage import UsageConfig
 
 Metrics = dict[str, dict[str, list[float | None]]]
@@ -88,8 +89,8 @@ def lazy(fn: Callable[[], float | None]) -> Callable[[], float | None]:
 def list_price(res: Resource, env: Env, usage: dict[str, object] | None = None) -> float | None:
     """Monthly list price of the resource as configured, or None when it cannot be priced.
 
-    Free grants and tier ladders are ignored on purpose: they are shared across the subscription, so what a change
-    saves is the plain price of the units it removes.
+    Free grants and tier ladders are ignored on purpose (every meter is priced at its headline unit price): they are
+    shared across the subscription, so what a change saves is the plain price of the units it removes.
     """
     try:
         est = estimate_resources([res], env.prices, UsageConfig(usage or {}), default_region=env.region)
@@ -105,7 +106,7 @@ def list_price(res: Resource, env: Env, usage: dict[str, object] | None = None) 
         if item.fixed_amount is not None:
             total += item.fixed_amount
         elif item.meter is not None:
-            total += item.meter.cost(item.quantity)
+            total += item.meter.unit_price * item.quantity  # headline price: no free tier, no ladder
         else:
             return None
     return total
@@ -124,6 +125,11 @@ def _signal_if_hot(stats: Stats, name: str, label: str) -> list[Signal]:
 
 def _hours_at_least(stats: Stats, limit: float) -> int:
     return sum(1 for v in stats.values if v >= limit)
+
+
+def _sustained(hours: int, stats: Stats) -> bool:
+    """Whether ``hours`` is a meaningful share of the *expected* hours (a few stray points never are)."""
+    return hours / max(stats.expected, 1) >= HOT_SHARE
 
 
 def _label(value: float) -> str:
@@ -222,7 +228,7 @@ def plan_case(res: Resource, env: Env, data: Metrics) -> Case:
     mem = _stat(data, "MemoryPercentage", env.expected, group="memory", trigger=True)
     queue = _stat(data, "HttpQueueLength", env.expected, unit="")
     signals: list[Signal] = []
-    if _hours_at_least(queue, QUEUE_LIMIT) / max(queue.hours, 1) >= HOT_SHARE:
+    if _sustained(_hours_at_least(queue, QUEUE_LIMIT), queue):
         signals.append(
             Signal(
                 "queue", f"HTTP queue of at least {QUEUE_LIMIT:g} requests in {_hours_at_least(queue, QUEUE_LIMIT)} h"
@@ -338,7 +344,7 @@ def pg_case(res: Resource, env: Env, data: Metrics) -> Case:
     ratio = [100 * a / m if a is not None and m else None for a, m in zip(active, limit, strict=False)]
     conn = build_stats("connections of max_connections", ratio, None, env.expected)
     signals = []
-    if conn.hours and _hours_at_least(conn, CONNECTION_LIMIT) / conn.hours >= HOT_SHARE:
+    if _sustained(_hours_at_least(conn, CONNECTION_LIMIT), conn):
         signals.append(
             Signal(
                 "connections",
@@ -349,9 +355,10 @@ def pg_case(res: Resource, env: Env, data: Metrics) -> Case:
     notes: list[str] = []
     metrics = [cpu, mem, storage, conn]
     if _pg_burstable(res):
-        credits_min = data.get("cpu_credits_remaining", {}).get("minimum", [])
-        empty = sum(1 for v in credits_min if v is not None and v <= 1.0)
-        if credits_min and empty / len(credits_min) >= HOT_SHARE:
+        remaining = _stat(data, "cpu_credits_remaining", env.expected, unit="")
+        low = build_stats(remaining.name, data.get("cpu_credits_remaining", {}).get("minimum", []), None, env.expected)
+        empty = sum(1 for v in low.values if v <= 1.0)
+        if _sustained(empty, low):
             signals.append(Signal("credits", f"CPU credits exhausted in {empty} h"))
     if storage.hours and storage.max >= 90:
         notes.append(f"storage is {storage.max:.0f}% full at its peak; that is a disk size question, not a SKU one")
@@ -404,6 +411,9 @@ SQL_DTU_LEVELS: dict[str, tuple[tuple[str, int, int], ...]] = {
     ),
 }
 SQL_GEN5_VCORES = (2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 24, 32, 40, 80)
+# Every provisioned Gen5 size holds at least 1 TB; larger limits depend on the size and tier, so a smaller size is not
+# proposed for a database configured above this.
+SQL_VCORE_SAFE_GB = 1024
 GIB = 2**30
 
 
@@ -413,6 +423,9 @@ def sql_skip(res: Resource) -> str | None:
         return "system database"
     if res.get("properties.elasticPoolId") not in (None, ""):
         return "member of an elastic pool (the pool is not covered)"
+    secondary = str(res.get("properties.secondaryType") or "")
+    if secondary or str(res.get("properties.createMode") or "").lower() in ("secondary", "onlinesecondary"):
+        return f"geo / named replica ({secondary or 'secondary'}): sized for its primary's replication workload"
     try:
         sku = parse_sql_sku(str(res.sku.get("name") or ""), int(as_number(res.sku.get("capacity"), 0)))
     except UnresolvedError as exc:
@@ -481,12 +494,16 @@ def _sql_candidates(
 
     def vcore(j: int) -> Candidate | None:
         new = SQL_GEN5_VCORES[j]
-        if max_gb > (1024 if new == 2 else 4096):
+        if new < parsed.vcores and max_gb > SQL_VCORE_SAFE_GB:
             return None
+        ratio = parsed.vcores / new
+        # CPU and worker threads scale with the vCores. The IO and log rate limits do not scale linearly (some sizes
+        # share one limit): a smaller size is judged with the linear ratio, which overstates its load, a larger size
+        # is assumed to bring no IO relief at all.
         return Candidate(
             f"{parsed.vcores} -> {new} vCores",
             f"{new} vCores",
-            {"cpu": parsed.vcores / new},
+            {"cpu": ratio, "io": max(ratio, 1.0)},
             lazy(lambda: list_price(with_value(res, "sku.capacity", new), env)),
             risk,
             f"az sql db update -g {res.resource_group} -s {server} -n {db} --capacity {parsed.vcores}",
@@ -502,11 +519,12 @@ def sql_case(res: Resource, env: Env, data: Metrics) -> Case:
     capacity = int(as_number(res.sku.get("capacity"), 0))
     parsed = parse_sql_sku(sku_name, capacity)
     group = "dtu" if parsed.model == "dtu" else "cpu"
+    io_group = "dtu" if parsed.model == "dtu" else "io"
     workers = _stat(data, "workers_percent", env.expected, group=group)
     storage = _stat(data, "storage_percent", env.expected)
     cpu = _stat(data, "cpu_percent", env.expected, group=group, trigger=parsed.model != "dtu")
-    data_io = _stat(data, "physical_data_read_percent", env.expected, group=group)
-    log_io = _stat(data, "log_write_percent", env.expected, group=group)
+    data_io = _stat(data, "physical_data_read_percent", env.expected, group=io_group)
+    log_io = _stat(data, "log_write_percent", env.expected, group=io_group)
     signals = _signal_if_hot(workers, "workers", "worker threads")
     if parsed.model == "dtu":
         # DTU is a blend of CPU, data IO and log IO: it is saturated for real when a component is at its limit too
@@ -564,6 +582,24 @@ def _aca_zone_redundant(res: Resource, env: Env) -> bool:
     return environment is None or environment.get("properties.zoneRedundant") is True
 
 
+def _aca_max_cpu(res: Resource, env: Env) -> float:
+    """Largest Consumption size: 4 vCPU on workload-profile environments, 2 on legacy (or unknown) ones."""
+    environment = env.index.find(res.get("properties.environmentId") or res.get("properties.managedEnvironmentId"))
+    profiles = environment.get("properties.workloadProfiles") if environment is not None else None
+    return 4.0 if isinstance(profiles, list) and profiles else 2.0
+
+
+def _restart_hours(series: list[float | None]) -> int:
+    """Hours in which the cumulative RestartCount went up (or restarted from zero after a replacement)."""
+    hours = 0
+    for before, now in pairwise(series):
+        if before is None or now is None:
+            continue
+        if now > before or (now < before and now > 0):
+            hours += 1
+    return hours
+
+
 def _aca_candidates(
     res: Resource, env: Env, cpu: float, gib: float, replica_hours: float, min_r: int, observed_max: float
 ) -> tuple[list[Candidate], list[Candidate], str | None]:
@@ -600,7 +636,7 @@ def _aca_candidates(
 
     i = ACA_CPUS.index(cpu)
     down = [size(ACA_CPUS[i - 1])] if i > 0 else []
-    up = [size(c) for c in ACA_CPUS[i + 1 :]]
+    up = [size(c) for c in ACA_CPUS[i + 1 :] if c <= _aca_max_cpu(res, env)]
     smallest = 2 if _aca_zone_redundant(res, env) else 1
     if min_r - 1 >= smallest and min_r >= 2 and observed_max <= min_r:
         ratio = min_r / (min_r - 1)
@@ -626,11 +662,11 @@ def aca_case(res: Resource, env: Env, data: Metrics) -> Case:
     min_r = int(as_number(res.get("properties.template.scale.minReplicas"), 0))
     max_r = int(as_number(res.get("properties.template.scale.maxReplicas"), 10))
     signals: list[Signal] = []
-    restart_hours = _hours_at_least(restarts, 1.0)
+    restart_hours = _restart_hours(data.get("restartcount", {}).get("maximum", []))
     if restart_hours:
-        signals.append(Signal("restarts", f"container restarts in {restart_hours} h"))
-    pinned = _hours_at_least(replicas, max_r) / max(replicas.hours, 1)
-    if max_r > min_r and replicas.hours and pinned >= PINNED_SHARE:
+        signals.append(Signal("restarts", f"container restarts in {restart_hours} h (RestartCount went up)"))
+    pinned = _hours_at_least(replicas, max_r) / max(replicas.expected, 1)
+    if max_r > min_r and pinned >= PINNED_SHARE:
         signals.append(Signal("pinned", f"replicas at the maximum of {max_r} in {pinned:.0%} of the hours"))
     cpus, gib = _size(res)
     replica_hours = replicas.mean * HOURS_PER_MONTH
@@ -641,7 +677,14 @@ def aca_case(res: Resource, env: Env, data: Metrics) -> Case:
         f"ran in {running} of {replicas.hours} h",
     ]
     insufficient = None
-    if running == 0:
+    if replicas.hours == 0:
+        insufficient = "the Replicas metric returned no data"
+    elif replicas.coverage < MIN_COVERAGE:
+        insufficient = (
+            f"the Replicas metric has only {replicas.hours} of {replicas.expected} hourly points: "
+            "scale-to-zero hours cannot be told from missing data"
+        )
+    elif running == 0:
         insufficient = "no replica ran in the whole window (scaled to zero, stopped or not reporting)"
     elif running < MIN_RUNNING_HOURS:
         insufficient = f"ran in only {running} h of the window (needs {MIN_RUNNING_HOURS} h to judge)"
