@@ -696,7 +696,7 @@ def _aca_candidates(
     return down, up, None
 
 
-def _aligned(data: Metrics, name: str, at: list[int], *, group: str, span: int) -> Stats:
+def _aligned(data: Metrics, name: str, at: list[int], *, group: str, span: int, full: bool) -> Stats:
     """The metric's points at the given hourly positions; ``expected`` is the number of positions."""
     d = data.get(name.lower(), {})
 
@@ -711,6 +711,7 @@ def _aligned(data: Metrics, name: str, at: list[int], *, group: str, span: int) 
         group=group,
         trigger=True,
         span=span,
+        full=full,
         positions=False,
     )
 
@@ -729,8 +730,9 @@ def aca_case(res: Resource, env: Env, data: Metrics) -> Case:
     # CPU and memory only report while a replica runs: judge them on those hours, aligned with the Replicas series
     running_at = [i for i, v in enumerate(data.get("replicas", {}).get("maximum", [])) if v is not None and v >= 1.0]
     running = len(running_at)
-    cpu = _aligned(data, "CpuPercentage", running_at, group="cpu", span=env.expected)
-    mem = _aligned(data, "MemoryPercentage", running_at, group="memory", span=env.expected)
+    known = replicas.hours >= replicas.expected  # hours without a replica count are not in the aligned series
+    cpu = _aligned(data, "CpuPercentage", running_at, group="cpu", span=env.expected, full=known)
+    mem = _aligned(data, "MemoryPercentage", running_at, group="memory", span=env.expected, full=known)
     restarts = _stat(data, "RestartCount", env.expected, unit="", required=True)
     min_r = int(as_number(res.get("properties.template.scale.minReplicas"), 0))
     max_r = int(as_number(res.get("properties.template.scale.maxReplicas"), 10))

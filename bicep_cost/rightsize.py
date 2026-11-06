@@ -62,6 +62,9 @@ class Stats:
     averages: tuple[float, ...] = ()  # the hourly averages that came back (empty when not read)
     gaps: tuple[int, int, int] | None = None  # (before the first point, between points, after the last) in hours
     span: int = 0  # hours of the whole window when ``expected`` counts fewer (a scale-to-zero app's running hours)
+    full: bool = (
+        True  # False when hours outside ``expected`` are unknown (e.g. no replica count), so nothing is "complete"
+    )
 
     @property
     def hours(self) -> int:
@@ -103,7 +106,7 @@ class Stats:
     @property
     def complete(self) -> bool:
         """Every expected hourly point came back, maxima and averages."""
-        return self.expected > 0 and self.hours >= self.expected and len(self.averages) >= self.expected
+        return self.full and self.expected > 0 and self.hours >= self.expected and len(self.averages) >= self.expected
 
     @property
     def sustained(self) -> bool:
@@ -137,6 +140,7 @@ def build_stats(
     trigger: bool = False,
     required: bool = False,
     span: int = 0,
+    full: bool = True,
     positions: bool = True,
 ) -> Stats:
     values = tuple(v for v in maxima if v is not None)
@@ -154,6 +158,7 @@ def build_stats(
         avgs,
         _gaps(maxima) if positions and len(maxima) == expected else None,
         span,
+        full,
     )
 
 
@@ -330,8 +335,8 @@ def decide(case: Case) -> Assessment:
     if limit is not None:  # saturated, but not a metric this rule sizes on: never "nothing to do"
         return d.done(
             "watch",
-            f"{_fmt(limit)}: at its limit, but {limit.name} is not a metric a size is proposed from "
-            "(its limit does not scale with the size); look at it by hand",
+            f"{_fmt(limit)}: at its limit, but {limit.name} cannot trigger a size proposal on its own "
+            "(it is only a second signal, or its relief cannot be predicted); look at it by hand",
         )
     return d.done(
         "ok", f"{_fmt(worst)}: between the over ({OVER_P95:.0f}/{OVER_MAX:.0f}%) and under thresholds, nothing to do"

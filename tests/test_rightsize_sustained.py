@@ -355,3 +355,56 @@ def test_markdown_carries_the_notes_of_not_sure_resources(prices: PriceClient) -
     md = rightsize_report.render_markdown(report, rightsize_report.select(report))
     assert "log IO is at or above 95% in 90 h" in md
     assert "scale up only around the busy hours" in md
+
+
+def test_an_app_with_unknown_replica_hours_never_proves_sustained_load(prices: PriceClient) -> None:
+    """36 h without a replica count are dropped from the aligned CPU series: it looks complete but is not."""
+    az = az_with(capp("gappy", cpu=1, memory="2Gi", min_r=1, max_r=1))
+    hours: list[float | None] = [None] * 36 + [1.0] * (HOURS - 36)
+    cpu: list[float | None] = [None] * 36 + [99.0] * (HOURS - 36)
+    az.give(
+        APP_T,
+        "gappy",
+        {
+            "Replicas": {"maximum": hours, "average": hours},
+            "CpuPercentage": {"maximum": cpu, "average": [None] * 36 + [97.0] * (HOURS - 36)},
+            "MemoryPercentage": {
+                "maximum": [None] * 36 + [30.0] * (HOURS - 36),
+                "average": [None] * 36 + [30.0] * (HOURS - 36),
+            },
+            "RestartCount": flat(0),
+        },
+    )
+    a = run(az, prices)["gappy"]
+    assert (a.verdict, a.proposal) == ("watch", None)
+    assert "complete 30 d window" in a.reason
+
+
+def test_saturated_sql_workers_do_not_get_a_wrong_explanation(prices: PriceClient) -> None:
+    sku: dict[str, JsonValue] = {"name": "GP_Gen5", "tier": "GeneralPurpose", "family": "Gen5", "capacity": 4}
+    az = az_with(sqldb("srv/w", sku, kind="v12.0,user,vcore"))
+    az.give(
+        SQL_T,
+        "srv/w",
+        {
+            "cpu_percent": flat(50),
+            "physical_data_read_percent": flat(5),
+            "log_write_percent": flat(5),
+            "workers_percent": flat(100),
+            "storage_percent": flat(10),
+        },
+    )
+    a = run(az, prices)["srv/w"]
+    assert a.verdict == "watch"
+    assert "cannot trigger a size proposal on its own" in a.reason
+    assert "does not scale" not in a.reason
+
+
+def test_markdown_lists_the_notes_of_ok_resources_too(prices: PriceClient) -> None:
+    az = az_with(plan("young", sku="P2v3"))
+    cpu = {"maximum": [None] * 36 + [50.0] * (HOURS - 36), "average": [None] * 36 + [30.0] * (HOURS - 36)}
+    az.give(PLAN_T, "young", {"CpuPercentage": cpu, "MemoryPercentage": cpu, "HttpQueueLength": flat(0)})
+    report = analyse(ArmClient(az, days=DAYS, now=NOW), prices, SUB, ())
+    assert report.assessments[0].verdict == "ok"
+    md = rightsize_report.render_markdown(report, rightsize_report.select(report))
+    assert "684 of 720 hourly points came back" in md

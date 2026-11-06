@@ -210,7 +210,8 @@ def render_markdown(report: Report, sel: Selection) -> str:
     oks = [a for a in sel.shown if a.verdict == "ok"]
     if oks:
         out += ["", f"### OK ({len(oks)})", ""]
-        out += [f"- `{a.name}` {a.sku}: {a.reason}" for a in oks]
+        for a in oks:
+            out += [f"- `{a.name}` {a.sku}: {a.reason}", *[f"  - {n}" for n in a.notes]]
     if report.skipped:
         out += ["", f"### Not assessed ({len(report.skipped)})", ""]
         out += [f"- `{s.name}` ({s.type}, {s.resource_group}): {s.reason}" for s in report.skipped]
