@@ -38,6 +38,11 @@ def fetch_inventory(
     if resource_groups:  # filter first: `project` drops the resourceGroup column
         query += " | where resourceGroup in~ (" + ", ".join(f"'{g}'" for g in resource_groups) + ")"
     query += " | project id, name, type, location, kind, sku, properties, plan, zones, managedBy"
+    return query_graph(arm, subscription_id, query)
+
+
+def query_graph(arm: ArmClient, subscription_id: str, query: str) -> list[dict[str, JsonValue]]:
+    """All rows of a Resource Graph query (follows the skip token)."""
     rows: list[dict[str, JsonValue]] = []
     skip: str | None = None
     while True:

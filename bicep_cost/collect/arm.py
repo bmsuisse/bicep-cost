@@ -148,6 +148,13 @@ class ArmClient:
     def post(self, path: str, api_version: str, body: dict[str, object]) -> dict[str, object] | None:
         return self.transport("POST", f"{ARM}{path}?api-version={api_version}", body)
 
+    def _metrics_url(self, resource_id: str, params: dict[str, str]) -> str:
+        timespan = f"{self.start:%Y-%m-%dT%H:%MZ}/{self.end:%Y-%m-%dT%H:%MZ}"
+        query = {"api-version": METRICS_API, "timespan": timespan, **params}
+        return f"{ARM}{resource_id}/providers/microsoft.insights/metrics?" + urllib.parse.urlencode(
+            query, quote_via=urllib.parse.quote
+        )
+
     def metrics(
         self,
         resource_id: str,
@@ -158,23 +165,26 @@ class ArmClient:
         namespace: str | None = None,
     ) -> list[Series]:
         """Time series of one metric over the window; empty if the resource or metric does not exist."""
-        timespan = f"{self.start:%Y-%m-%dT%H:%MZ}/{self.end:%Y-%m-%dT%H:%MZ}"
-        params = {
-            "api-version": METRICS_API,
-            "metricnames": name,
-            "aggregation": aggregation,
-            "timespan": timespan,
-            "interval": interval,
-        }
+        params = {"metricnames": name, "aggregation": aggregation, "interval": interval}
         if odata_filter:
             params["$filter"] = odata_filter
         if namespace:
             params["metricnamespace"] = namespace
-        url = f"{ARM}{resource_id}/providers/microsoft.insights/metrics?" + urllib.parse.urlencode(
-            params, quote_via=urllib.parse.quote
-        )
-        payload = self.transport("GET", url, None)
+        payload = self.transport("GET", self._metrics_url(resource_id, params), None)
         return parse_series(payload, aggregation)
+
+    def metrics_many(
+        self, resource_id: str, names: Sequence[str], aggregations: Sequence[str], interval: str
+    ) -> dict[str, dict[str, list[float | None]]]:
+        """Several unsplit metrics in one call: lower-cased metric name -> lower-cased aggregation -> values.
+
+        A metric the resource does not have is missing from the result (or comes back empty); a metric that does not
+        support one of the aggregations has ``None`` for it.
+        """
+        params = {"metricnames": ",".join(names), "aggregation": ",".join(aggregations), "interval": interval}
+        payload = self.transport("GET", self._metrics_url(resource_id, params), None)
+        hours = self.days * 24 if interval == "PT1H" else 0
+        return parse_metrics(payload, aggregations, self.start, hours)
 
     def query_workspace(self, workspace_id: str, query: str) -> list[list[object]]:
         """Rows of the first result table of a Log Analytics query over the window."""
@@ -245,3 +255,51 @@ def parse_series(payload: dict[str, object] | None, aggregation: str) -> list[Se
         data: list[_MetricData] = [d for d in ts.get("data", []) if isinstance(d, dict)]
         result.append(Series(dims, [d.get(key) for d in data]))  # type: ignore[misc]
     return result
+
+
+def parse_metrics(
+    payload: dict[str, object] | None,
+    aggregations: Sequence[str],
+    start: datetime | None = None,
+    hours: int = 0,
+) -> dict[str, dict[str, list[float | None]]]:
+    """Per metric name, the first (unsplit) time series as one value list per aggregation.
+
+    With ``start`` and ``hours`` (hourly data) every list covers exactly that window, placed by timestamp: a record
+    Azure left out, or a metric that starts later, is a missing hour, so lists of different calls line up.
+    """
+    out: dict[str, dict[str, list[float | None]]] = {}
+    values = payload.get("value") if payload else None
+    if not isinstance(values, list):
+        return out
+    keys = [a.lower() for a in aggregations]
+    for metric in values:
+        name = metric.get("name") if isinstance(metric, dict) else None
+        series = metric.get("timeseries") if isinstance(metric, dict) else None
+        if not isinstance(name, dict) or not isinstance(series, list) or not series:
+            continue
+        data = series[0].get("data") if isinstance(series[0], dict) else None
+        points = [d for d in data if isinstance(d, dict)] if isinstance(data, list) else []
+        if start is not None and hours and all("timeStamp" in d for d in points):
+            slots: list[dict[str, object]] = [{} for _ in range(hours)]
+            for d in points:
+                index = _hour_index(str(d["timeStamp"]), start)
+                if index is not None and 0 <= index < hours:
+                    slots[index] = d
+            points = slots
+        out[str(name.get("value", "")).lower()] = {k: [_number(d.get(k)) for d in points] for k in keys}
+    return out
+
+
+def _hour_index(stamp: str, start: datetime) -> int | None:
+    try:
+        moment = datetime.fromisoformat(stamp)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return int((moment - start).total_seconds() // 3600)
+
+
+def _number(value: object) -> float | None:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
