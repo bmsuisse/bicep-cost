@@ -14,6 +14,7 @@ from bicep_cost.collect.collectors import Finding, collect_all
 from bicep_cost.collect.toml_out import render_usage_toml
 from bicep_cost.compile import CompileError, load_input
 from bicep_cost.engine import DeploymentSettings, Engine
+from bicep_cost.existing import load_existing, merge_existing
 from bicep_cost.prices import PriceClient, PriceError, build_filter, default_cache_dir, normalize_currency
 from bicep_cost.pricesheet import PriceSheet
 from bicep_cost.report import EstimateJson, render_csv, render_diff, render_json, render_markdown, render_text
@@ -46,6 +47,18 @@ def _add_budget_args(parser: argparse.ArgumentParser) -> None:
         type=_nonnegative_number,
         metavar="PERCENT",
         help="exit with 3 if the monthly total increases by more than PERCENT over the baseline",
+    )
+
+
+def _add_existing_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--existing",
+        type=Path,
+        action="append",
+        default=[],
+        metavar="FILE.json",
+        help="JSON list of Azure resources the template only references (Bicep `existing`: plan, database, "
+        "Log Analytics, ...) so they are priced too; same fields as an ARM resource. Repeatable",
     )
 
 
@@ -83,6 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="TOML usage file (storage GB, log volume, ...); repeatable, later files win. Default: <params>.usage.toml "
         "or bicep-cost.usage.toml next to the template, if present",
     )
+    _add_existing_arg(est)
     est.add_argument(
         "--currency", default=None, help="price currency (default: the usage file's cost currency, else USD)"
     )
@@ -134,6 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument("template", type=Path, help="same input as `estimate`")
     collect.add_argument("-p", "--parameters", type=Path)
     collect.add_argument("--set", dest="overrides", action="append", default=[], metavar="NAME=VALUE")
+    _add_existing_arg(collect)
     collect.add_argument("--subscription-id", help="subscription of the deployment (default: the az CLI's current one)")
     collect.add_argument(
         "--resource-group", required=True, help="resource group the template is deployed to (as for `estimate`)"
@@ -154,6 +169,7 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("template", type=Path)
     init.add_argument("-p", "--parameters", type=Path)
     init.add_argument("--set", dest="overrides", action="append", default=[], metavar="NAME=VALUE")
+    _add_existing_arg(init)
     init.add_argument("--location", default="westeurope")
     init.add_argument("-o", "--output", type=Path, help="default: stdout")
     _add_cache_args(init)
@@ -219,15 +235,7 @@ def _cmd_estimate(args: argparse.Namespace) -> int:
     if args.fail_increase_percent is not None and args.baseline is None:
         raise ValueError("--fail-increase-percent requires --baseline REPORT.json")
     baseline = _load_report(args.baseline) if args.baseline else None
-    compiled = load_input(args.template, args.parameters, args.overrides)
-    engine = Engine(
-        DeploymentSettings(
-            subscription_id=args.subscription_id,
-            resource_group=args.resource_group,
-            location=args.location,
-        )
-    )
-    engine.expand(compiled.template, compiled.parameters)
+    engine, source = _expand(args, args.subscription_id, args.resource_group)
     usage_files = args.usage or discover_usage_files(args.template, args.parameters)
     if usage_files:
         print("bicep-cost: usage from " + ", ".join(str(f) for f in usage_files), file=sys.stderr)
@@ -252,7 +260,6 @@ def _cmd_estimate(args: argparse.Namespace) -> int:
         usage,
         default_region=args.location.replace(" ", "").lower(),
     )
-    source = compiled.source
     if args.format == "json":
         text = render_json(estimate, source, engine.diagnostics)
     elif args.format == "csv":
@@ -314,6 +321,10 @@ def _expand(args: argparse.Namespace, subscription_id: str, resource_group: str)
         DeploymentSettings(subscription_id=subscription_id, resource_group=resource_group, location=args.location)
     )
     engine.expand(compiled.template, compiled.parameters)
+    existing = load_existing(args.existing, subscription_id, resource_group)
+    engine.resources, skipped = merge_existing(engine.resources, existing)
+    for message in skipped:
+        engine.warn(message)
     return engine, compiled.source
 
 
