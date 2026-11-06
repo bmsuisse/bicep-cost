@@ -130,6 +130,9 @@ def test_template_resources_win_over_existing_entries() -> None:
         ('[{"type": "Microsoft.Web/serverfarms"}]', "needs a 'type'"),
         ('[{"type": "serverfarms", "name": "x"}]', "needs a 'type'"),
         ('[{"type": "Microsoft.Web/serverfarms", "name": "x", "resourceGroup": ""}]', "'resourceGroup' must be"),
+        ('[{"type": "Microsoft.Web/serverfarms", "name": "shared/typo"}]', "needs 1 name segment"),
+        ('[{"type": "Microsoft.Web/sites/slots", "name": "only-site"}]', "needs 2 name segment"),
+        ('[{"type": "Microsoft.Web/sites/slots", "name": "site/"}]', "needs 2 name segment"),
     ],
 )
 def test_invalid_files_are_rejected_with_the_file_name(tmp_path: Path, content: str, message: str) -> None:
@@ -176,3 +179,9 @@ def test_same_named_resources_in_different_groups_are_rejected() -> None:
         merge_existing([deployed], [elsewhere])
     with pytest.raises(ExistingError, match="cannot be told apart"):
         merge_existing([], [deployed, elsewhere])
+
+
+def test_child_resources_take_parent_and_child_names(tmp_path: Path) -> None:
+    slot = {"type": "Microsoft.Web/sites/slots", "name": "site/staging"}
+    (res,) = load_existing([write(tmp_path, [slot])], SUB, RG)
+    assert res.id.endswith("/providers/Microsoft.Web/sites/site/slots/staging")

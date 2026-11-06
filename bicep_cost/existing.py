@@ -68,9 +68,15 @@ def _resource(path: Path, index: int, entry: JsonValue, subscription_id: str, re
     if type_ is None or name is None or "/" not in type_:
         raise ExistingError(f"{path}: {where}: needs a 'type' like Microsoft.Web/serverfarms and a 'name'")
     where = f"{type_}/{name}"
+    segments = name.split("/")
+    if len(segments) != type_.count("/") or not all(segments):
+        raise ExistingError(
+            f"{path}: {where}: {type_} needs {type_.count('/')} name segment(s) joined with '/' "
+            "(parent/child for child resources)"
+        )
     sub = _text(path, where, entry, "subscriptionId") or subscription_id
     rg = _text(path, where, entry, "resourceGroup") or resource_group
-    rid = build_resource_id(f"/subscriptions/{sub}/resourceGroups/{rg}", type_, name.split("/"))
+    rid = build_resource_id(f"/subscriptions/{sub}/resourceGroups/{rg}", type_, segments)
     body: dict[str, JsonValue] = {k: v for k, v in entry.items() if k not in ("subscriptionId", "resourceGroup")}
     body["id"] = rid
     # The scope is part of the report address so same-named resources in different groups stay distinguishable.
