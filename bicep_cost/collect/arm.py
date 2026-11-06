@@ -183,7 +183,8 @@ class ArmClient:
         """
         params = {"metricnames": ",".join(names), "aggregation": ",".join(aggregations), "interval": interval}
         payload = self.transport("GET", self._metrics_url(resource_id, params), None)
-        return parse_metrics(payload, aggregations)
+        hours = self.days * 24 if interval == "PT1H" else 0
+        return parse_metrics(payload, aggregations, self.start, hours)
 
     def query_workspace(self, workspace_id: str, query: str) -> list[list[object]]:
         """Rows of the first result table of a Log Analytics query over the window."""
@@ -257,15 +258,21 @@ def parse_series(payload: dict[str, object] | None, aggregation: str) -> list[Se
 
 
 def parse_metrics(
-    payload: dict[str, object] | None, aggregations: Sequence[str]
+    payload: dict[str, object] | None,
+    aggregations: Sequence[str],
+    start: datetime | None = None,
+    hours: int = 0,
 ) -> dict[str, dict[str, list[float | None]]]:
-    """Per metric name, the first (unsplit) time series as one value list per aggregation."""
+    """Per metric name, the first (unsplit) time series as one value list per aggregation.
+
+    With ``start`` and ``hours`` (hourly data) every list covers exactly that window, placed by timestamp: a record
+    Azure left out, or a metric that starts later, is a missing hour, so lists of different calls line up.
+    """
     out: dict[str, dict[str, list[float | None]]] = {}
     values = payload.get("value") if payload else None
     if not isinstance(values, list):
         return out
     keys = [a.lower() for a in aggregations]
-    grid = _time_grid(values)
     for metric in values:
         name = metric.get("name") if isinstance(metric, dict) else None
         series = metric.get("timeseries") if isinstance(metric, dict) else None
@@ -273,24 +280,25 @@ def parse_metrics(
             continue
         data = series[0].get("data") if isinstance(series[0], dict) else None
         points = [d for d in data if isinstance(d, dict)] if isinstance(data, list) else []
-        if grid is not None:  # one shared hourly grid: a record Azure left out becomes a missing hour
-            by_time = {str(d["timeStamp"]): d for d in points}
-            points = [by_time.get(t, {}) for t in grid]
+        if start is not None and hours and all("timeStamp" in d for d in points):
+            slots: list[dict[str, object]] = [{} for _ in range(hours)]
+            for d in points:
+                index = _hour_index(str(d["timeStamp"]), start)
+                if index is not None and 0 <= index < hours:
+                    slots[index] = d
+            points = slots
         out[str(name.get("value", "")).lower()] = {k: [_number(d.get(k)) for d in points] for k in keys}
     return out
 
 
-def _time_grid(metrics: list[object]) -> list[str] | None:
-    """Sorted union of the data point timestamps of all metrics, or None when they do not carry any."""
-    stamps: set[str] = set()
-    for metric in metrics:
-        series = metric.get("timeseries") if isinstance(metric, dict) else None
-        data = series[0].get("data") if isinstance(series, list) and series and isinstance(series[0], dict) else None
-        for d in data if isinstance(data, list) else []:
-            if not isinstance(d, dict) or "timeStamp" not in d:
-                return None
-            stamps.add(str(d["timeStamp"]))
-    return sorted(stamps) or None
+def _hour_index(stamp: str, start: datetime) -> int | None:
+    try:
+        moment = datetime.fromisoformat(stamp)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return int((moment - start).total_seconds() // 3600)
 
 
 def _number(value: object) -> float | None:

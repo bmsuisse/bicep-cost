@@ -1,5 +1,8 @@
 """Regression tests for the ways a proposal could be made on thin, stale or non-transferable evidence."""
 
+from datetime import UTC, datetime, timedelta
+from urllib.parse import parse_qs, urlparse
+
 import pytest
 
 from bicep_cost import rightsize_report
@@ -399,7 +402,7 @@ def test_missing_queue_telemetry_blocks_a_plan_downsize(prices: PriceClient) -> 
     assert "HttpQueueLength" in a.reason
 
 
-def test_metrics_are_put_on_one_timestamp_grid() -> None:
+def test_metrics_are_placed_on_the_requested_hourly_window() -> None:
     def point(hour: int, value: float | None) -> dict[str, object]:
         stamp = {"timeStamp": f"2026-11-06T{hour:02d}:00:00Z"}
         return {**stamp, "maximum": value} if value is not None else stamp
@@ -410,6 +413,38 @@ def test_metrics_are_put_on_one_timestamp_grid() -> None:
             {"name": {"value": "B"}, "timeseries": [{"data": [point(0, 10), point(2, 30)]}]},  # hour 1 omitted
         ]
     }
-    parsed = parse_metrics(payload, ["Maximum"])
-    assert parsed["a"]["maximum"] == [1, 2, 3]
-    assert parsed["b"]["maximum"] == [10, None, 30]
+    parsed = parse_metrics(payload, ["Maximum"], datetime(2026, 11, 6, tzinfo=UTC), 4)
+    assert parsed["a"]["maximum"] == [1, 2, 3, None]  # the window is 4 hours, the last one was not reported
+    assert parsed["b"]["maximum"] == [10, None, 30, None]
+
+
+def test_omitted_replica_records_stay_missing_through_the_one_by_one_fallback(prices: PriceClient) -> None:
+    az = az_with(capp("api", cpu=2, memory="4Gi"))
+    start = datetime(2026, 11, 6, 10, tzinfo=UTC) - timedelta(days=DAYS)
+
+    def stamped(values: list[float | None]) -> list[dict[str, object]]:
+        out: list[dict[str, object]] = []
+        for i, v in enumerate(values):
+            if v is None and i >= 648:
+                continue  # Azure leaves the record out altogether
+            stamp = (start + timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            out.append({"timeStamp": stamp, **({} if v is None else {"maximum": v, "average": v})})
+        return out
+
+    series: dict[str, list[float | None]] = {
+        "Replicas": [*[1.0] * 648, *[None] * 72],
+        "CpuPercentage": [*[8.0] * 648, *[99.0] * 72],
+        "MemoryPercentage": [*[8.0] * 648, *[99.0] * 72],
+        "RestartCount": [0.0] * HOURS,
+    }
+
+    def metrics(url: str, body: dict[str, object] | None) -> dict[str, object]:
+        names = parse_qs(urlparse(url).query)["metricnames"][0].split(",")
+        if len(names) > 1:
+            raise AzureError("GET x -> HTTP 400: metric not supported")
+        return {"value": [{"name": {"value": n}, "timeseries": [{"data": stamped(series[n])}]} for n in names]}
+
+    az.routes.insert(0, ("/metrics?", metrics))
+    a = run(az, prices)["api"]
+    assert (a.verdict, a.proposal) == ("watch", None)
+    assert "replica count is unknown" in a.reason
