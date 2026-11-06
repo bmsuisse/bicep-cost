@@ -18,7 +18,7 @@ from bicep_cost.engine import DeploymentSettings, Engine
 from bicep_cost.prices import PriceClient, PriceError, build_filter, default_cache_dir, normalize_currency
 from bicep_cost.pricesheet import PriceSheet
 from bicep_cost.report import EstimateJson, render_csv, render_diff, render_json, render_markdown, render_text
-from bicep_cost.spikes import MAX_DAILY_DAYS, RETRY_WAITS, detect_spikes, resolve_scope
+from bicep_cost.spikes import MAX_DAILY_DAYS, RETRY_WAITS, detect_spikes, resolve_scope, validate_window
 from bicep_cost.spikes import render_json as render_spikes_json
 from bicep_cost.spikes import render_text as render_spikes_text
 from bicep_cost.usage import UsageConfig
@@ -395,6 +395,7 @@ def _cmd_collect(args: argparse.Namespace) -> int:
 
 
 def _cmd_spikes(args: argparse.Namespace) -> int:
+    validate_window(args.days, args.recent)
     scope = resolve_scope(args.scope, args.subscription_id, args.resource_group)
     report = detect_spikes(
         http_transport(throttle_waits=RETRY_WAITS),

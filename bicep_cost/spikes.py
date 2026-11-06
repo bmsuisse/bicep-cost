@@ -20,6 +20,7 @@ MAX_DAILY_DAYS = 31  # Daily granularity ceiling of the Query API
 RETRY_WAITS = (15.0, 30.0, 60.0)  # the Query API allows 4 requests/minute per scope: space the retries, max 3
 PAGE_PAUSE = 5.0
 NO_GROUP = "(none)"
+EPSILON = 1e-9  # float slack so that e.g. 10.2 - 5.2 still meets a minimum delta of 5
 CHART_DAYS = 7  # days shown before the recent window in each spike's daily series
 
 
@@ -53,6 +54,11 @@ class SpikeReport:
     recent_days: int
     spikes: list[Spike]
     total_per_day: dict[date, float]
+
+
+def validate_window(days: int, recent: int) -> None:
+    if not 2 <= days <= MAX_DAILY_DAYS or not 1 <= recent < days:
+        raise ValueError(f"--days must be 2..{MAX_DAILY_DAYS} and --recent at least 1 and smaller than --days")
 
 
 def resolve_scope(scope: str | None, subscription_id: str | None, resource_group: str | None) -> str:
@@ -148,8 +154,8 @@ def find_spikes(
         baseline = statistics.median(base) if base else 0.0
         now = statistics.fmean(costs.get(d, 0.0) for d in recent_days)
         delta = now - baseline
-        is_new = sum(base) == 0
-        if delta > 0 and delta >= min_delta and (is_new or now >= ratio * baseline):
+        is_new = all(c == 0 for c in base)
+        if delta > 0 and delta >= min_delta - EPSILON and (is_new or now >= ratio * baseline):
             spikes.append(
                 Spike(
                     group=group,
@@ -179,8 +185,7 @@ def detect_spikes(
     cost_type: str = "ActualCost",
     sleep: Callable[[float], None] = time.sleep,
 ) -> SpikeReport:
-    if not 2 <= days <= MAX_DAILY_DAYS or not 1 <= recent < days:
-        raise ValueError(f"--days must be 2..{MAX_DAILY_DAYS} and --recent at least 1 and smaller than --days")
+    validate_window(days, recent)
     last_day = today - timedelta(days=1)
     start = last_day - timedelta(days=days - 1)
     rows, currency = fetch_daily_costs(transport, scope, start, today, group_by, service, cost_type, sleep)
@@ -209,11 +214,12 @@ def render_text(report: SpikeReport) -> str:
     if not report.spikes:
         lines.append("no spikes above thresholds")
         return "\n".join(lines) + "\n"
-    lines.append(f"{'group':60} {'baseline/d':>11} {'recent/d':>10} {'delta/d':>9} {'x':>6}  peak")
+    width = max(len("group"), *(len(s.group) for s in report.spikes))
+    lines.append(f"{'group':{width}} {'baseline/d':>11} {'recent/d':>10} {'delta/d':>9} {'x':>6}  peak")
     for s in report.spikes:
         mult = "new" if s.new else "n/a" if s.ratio is None else f"{s.ratio}x"
         lines.append(
-            f"{s.group[:60]:60} {s.baseline_per_day:>11} {s.recent_per_day:>10} {s.delta_per_day:>9} {mult:>6}  "
+            f"{s.group:{width}} {s.baseline_per_day:>11} {s.recent_per_day:>10} {s.delta_per_day:>9} {mult:>6}  "
             f"{s.peak_day.isoformat()}"
         )
     return "\n".join(lines) + "\n"

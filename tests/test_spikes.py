@@ -250,6 +250,30 @@ def test_spikes_command_prints_json(monkeypatch: pytest.MonkeyPatch, capsys: pyt
     assert out["spikes"][0]["new"] is True
 
 
-def test_spikes_command_reports_invalid_window(capsys: pytest.CaptureFixture[str]) -> None:
+def test_spikes_command_validates_window_before_touching_azure(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def no_azure(**_: object) -> None:
+        raise AssertionError("must not authenticate for an invalid window")
+
+    monkeypatch.setattr(cli, "http_transport", no_azure)
     assert cli.main(["spikes", "--scope", "/subscriptions/s", "--days", "40"]) == 1
     assert "--days" in capsys.readouterr().err
+
+
+def test_credits_in_the_baseline_do_not_make_a_group_new() -> None:
+    base = [100.0] * 27 + [-2700.0]  # sums to zero, median 100
+    rows = [CostRow("a", START + timedelta(n), c) for n, c in enumerate(base)]
+    rows += [CostRow("a", LAST_DAY - timedelta(n), 110.0) for n in range(3)]
+    assert spike_groups(rows, min_delta=1) == []
+
+
+def test_min_delta_boundary_is_not_lost_to_float_rounding() -> None:
+    assert spike_groups(series("a", 5.2, 10.2)) == ["a"]
+
+
+def test_text_output_keeps_full_resource_ids() -> None:
+    rid = "/subscriptions/71dea60e/resourceGroups/rg-data/providers/Microsoft.Storage/storageAccounts/stprod"
+    (found,) = find_spikes(series(rid, 10, 300), START, LAST_DAY, 3, 5.0, 1.5)
+    report = spikes.SpikeReport("/s", "EUR", "ActualCost", "ResourceId", START, LAST_DAY, 3, [found], {})
+    assert rid in spikes.render_text(report)
