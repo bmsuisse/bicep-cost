@@ -238,8 +238,8 @@ matched by resource id and shown next to the numbers as a second opinion. Every 
 | Verdict | Meaning |
 |---|---|
 | `over` | low load on every sizing metric and a smaller step of the same family stays comfortable and is cheaper: a proposal |
-| `under` | sustained saturation confirmed by an independent second signal: a proposal when one larger step fixes it |
-| `watch` | something is off but not enough to propose (one signal only, thin or contradictory data, no price) |
+| `under` | saturation confirmed by an independent second signal, or sustained on its own (hourly average saturated for a quarter of a complete 30 d window): a proposal when one larger step fixes it |
+| `watch` | something is off but not enough to propose (peaks only, one signal only, thin or contradictory data, no price) |
 | `ok` | nothing to do, or nothing that can safely be done (shown with the reason) |
 | `no-data` | Azure Monitor returned nothing usable (for example an app that never ran) |
 
@@ -291,8 +291,8 @@ PROPOSALS (ranked by monthly money)
     note: ran in 720 of 720 h
 
 WATCH (not sure enough to propose): 1
-  plan-batch-example  [Microsoft.Web/serverFarms, rg-example]  P1v3 x1: CpuPercentage p95 86% / max 100%, but no second signal (restarts, pinned replicas, limits, Advisor)
-    CpuPercentage                    p95   85.7%  max  100.0%  mean   23.8%  720/720 h (100%)
+  plan-batch-example  [Microsoft.Web/serverFarms, rg-example]  P1v3 x1: CpuPercentage p95 86% / max 100% [hourly average at or above 90% in 0 of 720 h (0%), highest 58%, mean 24%]: not sustained (an hourly average of 90% in 25% of the hours would be); no second signal (restarts, pinned replicas, limits, Advisor)
+    CpuPercentage                    p95   85.7%  max  100.0%  mean   23.8%  720/720 h (100%)  hourly avg >= 90%: 0 h
     MemoryPercentage                 p95   62.4%  max   68.4%  mean   49.4%  720/720 h (100%)
     HttpQueueLength                  p95       0  max       0  mean       0  720/720 h (100%)
     note: 1 instance(s)
@@ -304,25 +304,28 @@ NOT COVERED (no right-sizing rules; never guessed): microsoft.compute/virtualmac
 
 | Rule | Threshold |
 |---|---|
-| Data needed for any verdict but `watch` / `no-data` | >= 90% of the expected hourly points for every sizing metric, window >= 14 days |
+| Data needed for any verdict but `watch` / `no-data` | >= 90% of the expected hourly points for every sizing metric, window >= 14 days. Below that a resource stays `watch` and the reason says where the points are missing (for example no points in the first 527 h, complete afterwards: younger than the window); smaller gaps are listed in the notes |
 | `over`: every sizing metric (CPU **and** memory, or DTU, workers, IO) | p95 of the hourly maxima <= 40% **and** max <= 60% |
 | `over`: the smaller step must keep the *predicted* load (current x old size / new size) | p95 <= 70% **and** max <= 85% |
 | `over`: window | >= 30 days, shorter windows cannot rule out a monthly cycle (`watch`) |
 | `over`: never | Burstable, serverless, Consumption / Flex, elastic or autoscale-managed resources, read replicas, resources with a contradicting signal or Advisor Performance recommendation, and anything that cannot be priced (`watch`) |
 | `over`: replicas / instances | one fewer, only if the minimum stays >= 2 for zone-redundant (or unknown) setups; Container Apps only when replicas never scaled beyond the minimum |
 | `under`: saturation | p95 of the hourly maxima >= 85%, **or** at least 2% of the hours at >= 95% (a single spike does not count) |
-| `under`: second signal (at least one), each over >= 2% of the expected hours | container restarts (the cumulative `RestartCount` went up), replicas at the maximum for >= 25% of the hours, connections >= 90% of `max_connections` or exhausted CPU credits (PostgreSQL), worker threads or a DTU component at the limit (SQL), HTTP queue >= 10 (App Service), or an Advisor Performance recommendation |
+| `under`: sustained (needs no second signal) | the hourly **average** of one CPU / memory / DTU metric at >= 90% in at least 25% of the expected hours (about 6 h a day), over a complete 30 d window with every hourly point returned (for a Container App scaling to zero the share is of the whole window, not of its running hours). An hourly maximum is the busiest minute of the hour, so a p95 of 100% can be one minute of a batch job; a daily batch window of 4 h (17%), a few spikes or a short window stay `watch` |
+| `under`: second signal (at least one), each over >= 2% of the expected hours | container restarts (the cumulative `RestartCount` went up), replicas at the maximum for >= 25% of the hours (apps that can scale to at least 2 replicas), connections >= 90% of `max_connections` or exhausted CPU credits (PostgreSQL), worker threads at the limit (SQL), HTTP queue >= 10 (App Service), or an Advisor Performance recommendation. Another saturated metric of the same resource is **not** a second signal: a SQL DTU database's CPU / data IO / log IO at the limit *is* its DTU at the limit, and CPU and memory p95 are both read from the same hourly maxima |
 | `under`: proposal | the smallest larger step of the same family whose predicted load is <= 70% / 85%; none fits: `under` without a proposal |
 | Anything between the thresholds | `ok`; saturation without a second signal: `watch` |
 
 Storage is shown but never judged or shrunk, and a smaller size is only proposed within the same family (App Service
 P0v3..P3v3, PostgreSQL D / E series, SQL DTU levels and Gen5 vCores that still hold the configured maximum size,
 Container Apps Consumption sizes, up to 4 vCPU on workload-profile environments and 2 on legacy ones). A saturated but
-mostly idle resource (mean < 25%) is flagged as bursty. SQL vCore databases: CPU and worker threads scale with the
+mostly idle resource (mean < 25%) is flagged as bursty, with the alternatives to a permanently larger size (scale up only
+around the busy hours, tune what runs then, serverless or autoscale where the type has it). A saturated metric that is not
+sized on (for example SQL vCore data IO) is a `watch`, never `ok`. SQL vCore databases: CPU and worker threads scale with the
 vCores, data and log IO limits do not scale linearly, so a smaller size is judged with the linear ratio (which
 overstates its load) and a larger size is assumed to bring no IO relief; databases configured above 1 TB are never
 shrunk. Container Apps also need the `Replicas` metric to be complete, so scale-to-zero hours are never confused with
-missing data.
+missing data; an app whose `runningStatus` is Stopped or whose provisioning failed says so instead of a bare `no-data`.
 
 ### What is covered, and what is not
 

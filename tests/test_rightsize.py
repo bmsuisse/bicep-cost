@@ -299,7 +299,13 @@ def sqldb(name: str, sku: dict[str, JsonValue], kind: str = "v12.0,user", **prop
 
 
 def capp(
-    name: str, cpu: float = 2, memory: str = "4Gi", min_r: int = 1, max_r: int = 3, containers: int = 1
+    name: str,
+    cpu: float = 2,
+    memory: str = "4Gi",
+    min_r: int = 1,
+    max_r: int = 3,
+    containers: int = 1,
+    **props: JsonValue,
 ) -> dict[str, JsonValue]:
     boxes: list[JsonValue] = [{"name": f"c{i}", "resources": {"cpu": cpu, "memory": memory}} for i in range(containers)]
     return row(
@@ -308,6 +314,7 @@ def capp(
         properties={
             "environmentId": rid("Microsoft.App/managedEnvironments", "env"),
             "template": {"containers": boxes, "scale": {"minReplicas": min_r, "maxReplicas": max_r}},
+            **props,
         },
     )
 
@@ -635,7 +642,7 @@ def test_sql_database_that_would_not_fit_the_smaller_level_is_kept(prices: Price
     assert (a.verdict, a.proposal) == ("ok", None)
 
 
-def test_sql_dtu_at_its_limit_with_a_saturated_component_is_under(prices: PriceClient) -> None:
+def test_sql_dtu_at_its_limit_with_a_saturated_component_is_under_when_sustained(prices: PriceClient) -> None:
     az = az_with(sqldb("srv/hot", {"name": "Standard", "tier": "Standard", "capacity": 20}))
     az.give(
         SQL_T,
@@ -651,7 +658,9 @@ def test_sql_dtu_at_its_limit_with_a_saturated_component_is_under(prices: PriceC
     )
     a = run(az, prices)["srv/hot"]
     assert a.verdict == "under"
-    assert any("log IO" in s.text for s in a.signals)
+    assert "sustained" in a.reason
+    assert any("log IO" in n for n in a.notes)  # what saturates is shown, but it is not a second signal
+    assert a.signals == []
 
 
 def test_sql_serverless_is_excluded_from_shrinking(prices: PriceClient) -> None:
