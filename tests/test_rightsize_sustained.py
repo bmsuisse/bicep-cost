@@ -408,3 +408,23 @@ def test_markdown_lists_the_notes_of_ok_resources_too(prices: PriceClient) -> No
     assert report.assessments[0].verdict == "ok"
     md = rightsize_report.render_markdown(report, rightsize_report.select(report))
     assert "684 of 720 hourly points came back" in md
+
+
+def test_an_app_with_missing_readings_while_running_says_where(prices: PriceClient) -> None:
+    """Replicas report for all 720 h, CPU is missing for the first 100 running hours."""
+    az = az_with(capp("leading", cpu=1, memory="2Gi", min_r=1, max_r=1))
+    ones = flat(1, 1)
+    az.give(
+        APP_T,
+        "leading",
+        {
+            "Replicas": ones,
+            "CpuPercentage": {"maximum": first_hours_none(100, 40.0), "average": first_hours_none(100, 20.0)},
+            "MemoryPercentage": flat(30),
+            "RestartCount": flat(0),
+        },
+    )
+    a = run(az, prices)["leading"]
+    assert a.verdict == "watch"
+    assert "only 620 of 720 hourly points" in a.reason
+    assert "missing: 100 running hours before the first point" in a.reason

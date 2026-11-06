@@ -711,8 +711,8 @@ def _aligned(data: Metrics, name: str, at: list[int], *, group: str, span: int, 
         group=group,
         trigger=True,
         span=span,
+        basis="running hours",
         full=full,
-        positions=False,
     )
 
 

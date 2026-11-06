@@ -62,9 +62,8 @@ class Stats:
     averages: tuple[float, ...] = ()  # the hourly averages that came back (empty when not read)
     gaps: tuple[int, int, int] | None = None  # (before the first point, between points, after the last) in hours
     span: int = 0  # hours of the whole window when ``expected`` counts fewer (a scale-to-zero app's running hours)
-    full: bool = (
-        True  # False when hours outside ``expected`` are unknown (e.g. no replica count), so nothing is "complete"
-    )
+    basis: str = ""  # what the hours are counted in when not calendar hours ("running hours")
+    full: bool = True  # False when hours outside ``expected`` are unknown (no replica count): never "complete"
 
     @property
     def hours(self) -> int:
@@ -118,15 +117,16 @@ class Stats:
         if self.gaps is None or self.hours >= self.expected:
             return ""
         before, between, after = self.gaps
-        if before and not between and not after:
+        unit = f" {self.basis}" if self.basis else " h"
+        if before and not between and not after and not self.basis:
             return (
-                f"no points in the first {before} h of the window, complete after that: the resource is younger than "
-                "the window or reported nothing before"
+                f"no points in the first {before}{unit} of the window, complete after that: the resource is younger "
+                "than the window or reported nothing before"
             )
-        if after and not before and not between:
-            return f"no points in the last {after} h of the window: it stopped reporting"
+        if after and not before and not between and not self.basis:
+            return f"no points in the last {after}{unit} of the window: it stopped reporting"
         where = ((before, "before the first point"), (between, "between points"), (after, "after the last point"))
-        return "missing: " + ", ".join(f"{n} h {w}" for n, w in where if n)
+        return "missing: " + ", ".join(f"{n}{unit} {w}" for n, w in where if n)
 
 
 def build_stats(
@@ -140,8 +140,8 @@ def build_stats(
     trigger: bool = False,
     required: bool = False,
     span: int = 0,
+    basis: str = "",
     full: bool = True,
-    positions: bool = True,
 ) -> Stats:
     values = tuple(v for v in maxima if v is not None)
     avgs = tuple(v for v in (averages or []) if v is not None)
@@ -156,8 +156,9 @@ def build_stats(
         trigger,
         required,
         avgs,
-        _gaps(maxima) if positions and len(maxima) == expected else None,
+        _gaps(maxima) if len(maxima) == expected else None,
         span,
+        basis,
         full,
     )
 
