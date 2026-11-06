@@ -44,7 +44,11 @@ def parse_plan_sku(name: str) -> PlanSku:
     if m := re.fullmatch(r"([bs])(\d)", low):
         return PlanSku("dedicated", DEDICATED_TIERS[m.group(1).upper()], n.upper())
     if m := re.fullmatch(r"p(\d)(m?)v([234])", low):
-        return PlanSku("dedicated", f"Premium v{m.group(3)}", f"P{m.group(1)}{m.group(2)} v{m.group(3)}")
+        # the price list spells "P1 v3" with a space but "P0v3", "P1mv3" and "P1v4" without
+        spaced = m.group(1) != "0" and not m.group(2) and m.group(3) in "23"
+        return PlanSku(
+            "dedicated", f"Premium v{m.group(3)}", f"P{m.group(1)}{m.group(2)}{' ' if spaced else ''}v{m.group(3)}"
+        )
     if m := re.fullmatch(r"i(\d)(m?)v2", low):
         return PlanSku("isolated", "Isolated v2", f"I{m.group(1)}{m.group(2)} v2")
     raise UnresolvedError(f"unrecognised App Service plan SKU {name!r}")

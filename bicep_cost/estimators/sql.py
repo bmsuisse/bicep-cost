@@ -33,7 +33,7 @@ TIER_PRODUCT = {
 
 @dataclass(frozen=True)
 class SqlSku:
-    model: str  # vcore | dtu | pool-member | free | unsupported
+    model: str  # vcore | dtu | pool-member | free | system | unsupported
     tier: str = ""  # GeneralPurpose | BusinessCritical | Hyperscale | Basic | Standard | Premium
     family: str = ""
     vcores: int = 0
@@ -41,9 +41,24 @@ class SqlSku:
     dtu_label: str = ""
 
 
-def parse_sku(name: str) -> SqlSku:
+# DTU count of a live Standard / Premium database -> its S / P level
+STANDARD_DTUS = {10: "S0", 20: "S1", 50: "S2", 100: "S3", 200: "S4", 400: "S6", 800: "S7", 1600: "S9", 3000: "S12"}
+PREMIUM_DTUS = {125: "P1", 250: "P2", 500: "P4", 1000: "P6", 1750: "P11", 4000: "P15"}
+
+
+def parse_sku(name: str, capacity: int = 0) -> SqlSku:
+    """Parse a template SKU (``GP_Gen5_2``, ``S1``) or the live shape (``GP_S_Gen5`` / ``Standard`` + ``capacity``)."""
     n = name.strip()
     low = n.lower()
+    if low.endswith("_system"):
+        return SqlSku("system")
+    if low in ("standard", "premium") and capacity:
+        levels = STANDARD_DTUS if low == "standard" else PREMIUM_DTUS
+        if capacity not in levels:
+            raise UnresolvedError(f"unrecognised {n} DTU count {capacity}")
+        n = low = levels[capacity].lower()
+    elif re.fullmatch(r"(gp|bc|hs)(_s)?_[a-z0-9]+", low) and capacity:
+        n, low = f"{n}_{capacity}", f"{low}_{capacity}"
     if low == "elasticpool":
         return SqlSku("pool-member")
     if low == "free":
@@ -182,7 +197,9 @@ def _backup_item(res: Resource, ctx: EstimateContext, section: str) -> list[Line
 
 
 def estimate_database(res: Resource, ctx: EstimateContext) -> ResourceEstimate:
-    sku = parse_sku(need_str(res, "sku.name", "SQL SKU"))
+    sku = parse_sku(need_str(res, "sku.name", "SQL SKU"), int(as_number(res.get("sku.capacity"), 0)))
+    if sku.model == "system":
+        return free(res, "system database (master)")
     if sku.model == "free" or res.get("properties.useFreeLimit") is True:
         return free(res, "free offer")
     if sku.model == "unsupported":
