@@ -590,14 +590,11 @@ def _aca_max_cpu(res: Resource, env: Env) -> float:
 
 
 def _restart_hours(series: list[float | None]) -> int:
-    """Hours in which the cumulative RestartCount went up (or restarted from zero after a replacement)."""
-    hours = 0
-    for before, now in pairwise(series):
-        if before is None or now is None:
-            continue
-        if now > before or (now < before and now > 0):
-            hours += 1
-    return hours
+    """Hours in which the cumulative RestartCount went up.
+
+    A drop is a replaced replica (a new baseline), not a restart: replica-level counters are not available here.
+    """
+    return sum(1 for before, now in pairwise(series) if before is not None and now is not None and now > before)
 
 
 def _aca_candidates(
@@ -653,11 +650,23 @@ def _aca_candidates(
     return down, up, None
 
 
+def _aligned(data: Metrics, name: str, at: list[int], *, group: str) -> Stats:
+    """The metric's points at the given hourly positions; ``expected`` is the number of positions."""
+    d = data.get(name.lower(), {})
+
+    def pick(values: list[float | None] | None) -> list[float | None]:
+        return [values[i] if values is not None and i < len(values) else None for i in at]
+
+    return build_stats(name, pick(d.get("maximum")), pick(d.get("average")), len(at), group=group, trigger=True)
+
+
 def aca_case(res: Resource, env: Env, data: Metrics) -> Case:
     replicas = _stat(data, "Replicas", env.expected, unit="")
-    running = _hours_at_least(replicas, 1.0)
-    cpu = _stat(data, "CpuPercentage", running, group="cpu", trigger=True)
-    mem = _stat(data, "MemoryPercentage", running, group="memory", trigger=True)
+    # CPU and memory only report while a replica runs: judge them on those hours, aligned with the Replicas series
+    running_at = [i for i, v in enumerate(data.get("replicas", {}).get("maximum", [])) if v is not None and v >= 1.0]
+    running = len(running_at)
+    cpu = _aligned(data, "CpuPercentage", running_at, group="cpu")
+    mem = _aligned(data, "MemoryPercentage", running_at, group="memory")
     restarts = _stat(data, "RestartCount", env.expected, unit="")
     min_r = int(as_number(res.get("properties.template.scale.minReplicas"), 0))
     max_r = int(as_number(res.get("properties.template.scale.maxReplicas"), 10))
@@ -684,6 +693,10 @@ def aca_case(res: Resource, env: Env, data: Metrics) -> Case:
             f"the Replicas metric has only {replicas.hours} of {replicas.expected} hourly points: "
             "scale-to-zero hours cannot be told from missing data"
         )
+    elif (
+        sum(1 for v in data.get("replicas", {}).get("average", []) if v is not None) < MIN_COVERAGE * replicas.expected
+    ):
+        insufficient = "the Replicas average has too few hourly points to price the replica hours"
     elif running == 0:
         insufficient = "no replica ran in the whole window (scaled to zero, stopped or not reporting)"
     elif running < MIN_RUNNING_HOURS:

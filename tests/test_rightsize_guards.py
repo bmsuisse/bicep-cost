@@ -173,6 +173,53 @@ def test_known_scale_to_zero_hours_are_not_missing_data(prices: PriceClient) -> 
     assert a.current_monthly == pytest.approx((2 * 3.4e-5 + 4 * 4e-6) * 3600 * 730 * 300 / 720)
 
 
+def test_cpu_and_memory_readings_outside_the_running_hours_do_not_count(prices: PriceClient) -> None:
+    az = az_with(capp("api", cpu=2, memory="4Gi", min_r=0))
+    running = {"maximum": first_hours(300, 1, 0), "average": first_hours(300, 1, 0)}
+    elsewhere = {"maximum": [*[None] * 300, *[8.0] * (HOURS - 300)]}  # readings only while no replica ran
+    az.give(
+        APP_T,
+        "api",
+        {"Replicas": running, "CpuPercentage": elsewhere, "MemoryPercentage": elsewhere, "RestartCount": flat(0)},
+    )
+    a = run(az, prices)["api"]
+    assert (a.verdict, a.proposal) == ("no-data", None)
+
+
+def test_replica_hours_are_never_extrapolated_from_the_busy_hours_only(prices: PriceClient) -> None:
+    az = az_with(capp("api", cpu=2, memory="4Gi", min_r=0))
+    replicas = {"maximum": first_hours(300, 1, 0), "average": first_hours(300, 1, None)}  # no average for the zeros
+    az.give(
+        APP_T,
+        "api",
+        {
+            "Replicas": replicas,
+            "CpuPercentage": {"maximum": first_hours(300, 8, None)},
+            "MemoryPercentage": {"maximum": first_hours(300, 15, None)},
+            "RestartCount": flat(0),
+        },
+    )
+    a = run(az, prices)["api"]
+    assert (a.verdict, a.proposal) == ("watch", None)
+    assert "Replicas average" in a.reason
+
+
+def test_a_falling_restart_counter_is_a_new_baseline_not_a_restart(prices: PriceClient) -> None:
+    az = az_with(capp("api", cpu=1, memory="2Gi"))
+    counter: list[float | None] = [5.0, *[1.0] * (HOURS - 1)]
+    az.give(
+        APP_T,
+        "api",
+        {
+            "Replicas": flat(1, 1),
+            "CpuPercentage": flat(95),
+            "MemoryPercentage": flat(40),
+            "RestartCount": {"maximum": counter, "average": list(counter)},
+        },
+    )
+    assert run(az, prices)["api"].verdict == "watch"
+
+
 def test_a_restart_counter_that_was_already_nonzero_before_the_window_is_not_a_signal(prices: PriceClient) -> None:
     az = az_with(capp("api", cpu=1, memory="2Gi"))
     az.give(
