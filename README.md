@@ -183,6 +183,8 @@ bicep-cost estimate ... --strict                       # exit 2 if something cou
 bicep-cost estimate ... --group-by type|module         # summary table instead of per-resource rows
 bicep-cost prices --service "Azure Container Apps" --meter-contains Idle   # browse meters
 bicep-cost spikes                                      # Azure cost spikes of the last days (needs az login)
+bicep-cost rightsize                                   # over- / under-provisioned resources from Azure Monitor (needs az login)
+bicep-cost rightsize --only over --min-saving 50       # filter: --only over|under, --min-saving, --fail-on over|under
 ```
 
 Other options: `--existing FILE.json` (price referenced `existing` resources), `--location` (default region and `resourceGroup().location`, default `westeurope`), `--resource-group`,
@@ -215,6 +217,131 @@ instead of `--subscription-id` / `--resource-group`).
 `spikes` is **read-only** (a single POST to the Cost Management `query` API) and needs **Cost Management Reader** on
 the scope. The Query API allows about 4 requests per minute per scope, so a 429 is retried after 15, 30 and 60 seconds
 (at most 3 times) before the command fails; avoid running it in a loop.
+
+## Find over- and under-provisioned resources
+
+```bash
+az login
+bicep-cost rightsize                                       # current az subscription, 30 days of hourly metrics
+bicep-cost rightsize --resource-group rg-prod --resource-group rg-data
+bicep-cost rightsize --only over --min-saving 50           # only shrink proposals worth at least 50 a month
+bicep-cost rightsize --days 60 --format json -o rightsize.json
+bicep-cost rightsize --fail-on under                       # CI: exit 3 when something is under-provisioned
+```
+
+`rightsize` answers "which resources are too big or too small?" from **real data**, and proposes a change only when it
+is sure. It lists the resources with Azure Resource Graph, reads Azure Monitor metrics at `PT1H` granularity over
+`--days` days (default 30, 14 to 90) and, per metric, reports the p95 of the hourly maxima, the maximum, the mean and
+the **data coverage** (hours that came back versus expected). Azure Advisor's Cost and Performance recommendations are
+matched by resource id and shown next to the numbers as a second opinion. Every resource gets one verdict:
+
+| Verdict | Meaning |
+|---|---|
+| `over` | low load on every sizing metric and a smaller step of the same family stays comfortable and is cheaper: a proposal |
+| `under` | sustained saturation confirmed by an independent second signal: a proposal when one larger step fixes it |
+| `watch` | something is off but not enough to propose (one signal only, thin or contradictory data, no price) |
+| `ok` | nothing to do, or nothing that can safely be done (shown with the reason) |
+| `no-data` | Azure Monitor returned nothing usable (for example an app that never ran) |
+
+A proposal contains the target size, the monthly saving or increase at list price (from the same estimators and price
+lookup as `estimate`; `--azure-prices` / `--price-sheet` work too), the predicted utilisation after the change, the risk
+and the exact command that rolls it back. Proposals are ranked by absolute monthly money, increases and savings alike.
+Example (synthetic data):
+
+```
+bicep-cost rightsize: subscription 00000000-0000-0000-0000-000000000000
+window 30 d ending 2026-11-06 10:00 UTC (720 hourly points); prices: Azure Retail Prices API list price, pay-as-you-go (USD)
+verdicts: 2 over, 1 under, 1 watch, 0 ok, 0 no-data
+over proposals would save 157.53 USD/month; under proposals would cost 43.58 USD/month more
+
+PROPOSALS (ranked by monthly money)
+ 1. OVER  plan-api-example  [Microsoft.Web/serverFarms, rg-example]  P2v3 x1
+    why: CpuPercentage p95 11% / max 31%; MemoryPercentage p95 24% / max 26%; P1v3 x1 would reach MemoryPercentage p95 49% / max 52%
+    proposal: P2v3 -> P1v3  (259.88 USD -> 129.94 USD/month, saves 129.94 USD/month, list price)
+    predicted after the change: CpuPercentage p95 22% / max 62%; MemoryPercentage p95 49% / max 52%
+    risk: low: the plan's workers restart while it scales (a short disruption); check memory-heavy apps afterwards
+    rollback: az appservice plan update -g rg-example -n plan-api-example --sku P2V3
+    CpuPercentage                    p95   10.8%  max   31.0%  mean    2.5%  720/720 h (100%)
+    MemoryPercentage                 p95   24.4%  max   26.0%  mean   19.8%  720/720 h (100%)
+    HttpQueueLength                  p95       0  max       0  mean       0  720/720 h (100%)
+    note: 1 instance(s)
+ 2. UNDER pg-orders-example  [Microsoft.DBforPostgreSQL/flexibleServers, rg-example]  B1ms
+    why: cpu_percent p95 100% / max 100% and connections at 90% of max_connections in 720 h; CPU credits exhausted in 80 h
+    proposal: B1ms -> B2s  (32.05 USD -> 75.63 USD/month, costs 43.58 USD/month, list price)
+    predicted after the change: cpu_percent p95 50% / max 50%; memory_percent p95 34% / max 37%
+    risk: medium: changing the compute size restarts the server (minutes of downtime)
+    rollback: az postgres flexible-server update -g rg-example -n pg-orders-example --sku-name Standard_B1ms --tier Burstable
+    cpu_percent                      p95  100.0%  max  100.0%  mean   38.7%  720/720 h (100%)
+    memory_percent                   p95   68.5%  max   74.7%  mean   54.0%  720/720 h (100%)
+    storage_percent                  p95   13.0%  max   13.0%  mean   13.0%  720/720 h (100%)
+    connections of max_connections   p95   98.0%  max   98.0%  mean   98.0%  720/720 h (100%)
+    signal: connections at 90% of max_connections in 720 h
+    signal: CPU credits exhausted in 80 h
+ 3. OVER  app-web-example  [Microsoft.App/containerApps, rg-example]  1 vCPU / 2 GiB, 1-3 replicas
+    why: CpuPercentage p95 21% / max 27%; MemoryPercentage p95 35% / max 39%; 0.75 vCPU / 1.5 GiB would reach MemoryPercentage p95 47% / max 52%
+    proposal: 1 vCPU / 2 GiB -> 0.75 vCPU / 1.5 GiB  (110.38 USD -> 82.78 USD/month, saves 27.59 USD/month, list price)
+    predicted after the change: CpuPercentage p95 28% / max 36%; MemoryPercentage p95 47% / max 52%
+    risk: low: creates a new revision; a replica that needs more memory than the new size gets OOM-killed
+    rollback: az containerapp update -g rg-example -n app-web-example --cpu 1 --memory 2Gi
+    CpuPercentage                    p95   20.7%  max   27.2%  mean    5.6%  720/720 h (100%)
+    MemoryPercentage                 p95   35.0%  max   39.2%  mean   27.0%  720/720 h (100%)
+    Replicas                         p95       1  max       1  mean       1  720/720 h (100%)
+    RestartCount                     p95       0  max       0  mean       0  720/720 h (100%)
+    note: configured 1-3 replicas, observed 1-1 (mean 1.0); 1 vCPU / 2 GiB per replica
+    note: ran in 720 of 720 h
+
+WATCH (not sure enough to propose): 1
+  plan-batch-example  [Microsoft.Web/serverFarms, rg-example]  P1v3 x1: CpuPercentage p95 86% / max 100%, but no second signal (restarts, pinned replicas, limits, Advisor)
+    CpuPercentage                    p95   85.7%  max  100.0%  mean   23.8%  720/720 h (100%)
+    MemoryPercentage                 p95   62.4%  max   68.4%  mean   49.4%  720/720 h (100%)
+    HttpQueueLength                  p95       0  max       0  mean       0  720/720 h (100%)
+    note: 1 instance(s)
+
+NOT COVERED (no right-sizing rules; never guessed): microsoft.compute/virtualmachines x1, microsoft.storage/storageaccounts x1
+```
+
+### When it is sure
+
+| Rule | Threshold |
+|---|---|
+| Data needed for any verdict but `watch` / `no-data` | >= 90% of the expected hourly points for every sizing metric, window >= 14 days |
+| `over`: every sizing metric (CPU **and** memory, or DTU, workers, IO) | p95 of the hourly maxima <= 40% **and** max <= 60% |
+| `over`: the smaller step must keep the *predicted* load (current x old size / new size) | p95 <= 70% **and** max <= 85% |
+| `over`: window | >= 30 days, shorter windows cannot rule out a monthly cycle (`watch`) |
+| `over`: never | Burstable, serverless, Consumption / Flex, elastic or autoscale-managed resources, read replicas, resources with a contradicting signal or Advisor Performance recommendation, and anything that cannot be priced (`watch`) |
+| `over`: replicas / instances | one fewer, only if the minimum stays >= 2 for zone-redundant (or unknown) setups; Container Apps only when replicas never scaled beyond the minimum |
+| `under`: saturation | p95 of the hourly maxima >= 85%, **or** at least 2% of the hours at >= 95% (a single spike does not count) |
+| `under`: second signal (at least one) | restarts, replicas at the maximum for >= 25% of the hours, connections >= 90% of `max_connections` or exhausted CPU credits (PostgreSQL), worker threads or a DTU component at the limit (SQL), HTTP queue >= 10 (App Service), or an Advisor Performance recommendation |
+| `under`: proposal | the smallest larger step of the same family whose predicted load is <= 70% / 85%; none fits: `under` without a proposal |
+| Anything between the thresholds | `ok`; saturation without a second signal: `watch` |
+
+Storage is shown but never judged or shrunk, and a smaller size is only proposed within the same family (App Service
+P0v3..P3v3, PostgreSQL D / E series, SQL DTU levels and Gen5 vCores that still hold the configured maximum size,
+Container Apps Consumption sizes). A saturated but mostly idle resource (mean < 25%) is flagged as bursty.
+
+### What is covered, and what is not
+
+| Type | Metrics | Smaller / larger steps |
+|---|---|---|
+| App Service plans (`Microsoft.Web/serverFarms`) | `CpuPercentage`, `MemoryPercentage`, `HttpQueueLength` | SKU within P0v3..P3v3, P1mv3..P5mv3, P1v2..P3v2, S1..S3, B1..B3; instance count |
+| PostgreSQL flexible servers | `cpu_percent`, `memory_percent`, `storage_percent`, `active_connections`, `max_connections`, `cpu_credits_remaining` | vCores within the D / E series, Burstable sizes (up only) |
+| Azure SQL databases | `dtu_consumption_percent`, `cpu_percent`, `workers_percent`, `physical_data_read_percent`, `log_write_percent`, `storage_percent` | DTU levels, Gen5 vCores (provisioned General Purpose / Business Critical) |
+| Container Apps (Consumption) | `Replicas`, `CpuPercentage`, `MemoryPercentage`, `RestartCount` | vCPU / memory step, minimum replicas |
+
+Everything else is listed under *not covered* with its count, never guessed: for example virtual machines (no
+reliable guest memory metric), elastic pools, Hyperscale, managed instances, AKS, Container Apps on a dedicated
+workload profile (billed on the environment, so no saving can be shown), and apps with several containers (the split of
+a smaller size between them is unknown). Azure SQL memory is not judged because SQL Server fills its buffer pool
+whatever the load. Resources of a covered type that cannot be assessed (system databases, pool members, read replicas,
+Consumption plans) are listed under *not assessed* with the reason. The JSON report (`--format json`) carries the same
+evidence: window, expected and covered hours, p95 / max / mean per metric, signals, Advisor matches, thresholds and
+the proposal.
+
+`rightsize` is **read-only**: it reads Resource Graph, Azure Monitor metrics and Azure Advisor and never changes
+anything. Needs `az login` with **Reader** and **Monitoring Reader** on the resources (Advisor read access for the
+second opinion; without it a warning is printed and the verdicts rely on the metrics alone). About one metrics call per
+resource is made, `--workers` (default 4) limits the parallelism, and throttled calls (429) are retried after 15, 30 and
+60 seconds like for `spikes`. Exit code 0, except real errors (1) and `--fail-on over|under` (3).
 
 ## Development
 

@@ -642,7 +642,7 @@ def aca_case(res: Resource, env: Env, data: Metrics) -> Case:
     ]
     insufficient = None
     if running == 0:
-        insufficient = "scaled to zero for the whole window: no replica ran"
+        insufficient = "no replica ran in the whole window (scaled to zero, stopped or not reporting)"
     elif running < MIN_RUNNING_HOURS:
         insufficient = f"ran in only {running} h of the window (needs {MIN_RUNNING_HOURS} h to judge)"
     return Case(

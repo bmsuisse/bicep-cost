@@ -34,6 +34,7 @@ MIN_COVERAGE = 0.9  # share of the expected hourly points that must have come ba
 MIN_DAYS = 14
 FULL_CYCLE_DAYS = 30  # shorter windows can hide a monthly cycle: no `over` proposal
 PINNED_SHARE = 0.25  # share of hours a scalable resource sits at its maximum replica count
+BURSTY_MEAN = 25.0  # a saturated resource whose mean load is below this is flagged as bursty
 MIN_SAVING = 0.01  # a proposal must save at least a cent a month
 
 VERDICTS = ("over", "under", "watch", "ok", "no-data")
@@ -195,10 +196,11 @@ def _worst(predicted: dict[str, tuple[float, float]]) -> str:
     return f"{name} p95 {p95:.0f}% / max {peak:.0f}%"
 
 
-@dataclass(frozen=True)
+@dataclass
 class _Decision:
     case: Case
     signals: list[Signal]
+    extra_notes: list[str] = field(default_factory=list)
 
     def done(
         self, verdict: str, reason: str, proposal: Proposal | None = None, current: float | None = None
@@ -218,7 +220,7 @@ class _Decision:
             c.advisor,
             proposal,
             current,
-            c.notes,
+            [*c.notes, *self.extra_notes],
         )
 
 
@@ -257,6 +259,12 @@ def decide(case: Case) -> Assessment:
 def _under(d: _Decision, hot: list[Stats]) -> Assessment:
     case = d.case
     why = f"{', '.join(_fmt(m) for m in hot)} and {'; '.join(s.text for s in d.signals)}"
+    d.extra_notes += [
+        f"bursty load: {m.name} is at or above {UNDER_MAX:.0f}% in {sum(1 for v in m.values if v >= UNDER_MAX)} of "
+        f"{m.hours} h but averages {m.mean:.0f}%; check that those hours matter before paying for a larger size"
+        for m in hot
+        if m.mean < BURSTY_MEAN
+    ]
     sizing = [m for m in case.metrics if m.group]
     for cand in case.up:
         predicted = predict(sizing, cand.factors)

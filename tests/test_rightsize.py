@@ -177,6 +177,17 @@ def test_saturation_plus_a_second_signal_is_under_with_a_larger_step() -> None:
     assert result.proposal.predicted["CpuPercentage"][0] == pytest.approx(50.0)
 
 
+def test_a_saturated_but_mostly_idle_resource_is_flagged_as_bursty() -> None:
+    cpu = build_stats(
+        "CpuPercentage", hourly(5, dict.fromkeys(range(50), 100)), hourly(5), HOURS, group="cpu", trigger=True
+    )
+    result = decide(case([cpu], up=[candidate("P3v3", 0.5, 160.0)], signals=[Signal("queue", "HTTP queue")]))
+    assert result.verdict == "under"
+    assert any("bursty load" in n and "50 of 720 h" in n for n in result.notes)
+    busy = sizing("CpuPercentage", hourly(91))
+    assert not decide(case([busy], up=[candidate("P3v3", 0.5, 160.0)], signals=[Signal("queue", "q")])).notes
+
+
 def test_an_advisor_performance_recommendation_is_a_second_signal_but_a_cost_one_is_not() -> None:
     cpu = sizing("CpuPercentage", hourly(91))
     cost = AdvisorRec("Cost", "High", "Right-size or shutdown underutilized virtual machines")
