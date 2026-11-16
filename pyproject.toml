@@ -37,7 +37,7 @@ pythonpath = ["."]
 line-length = 120
 indent-width = 4
 target-version = "py311"
-extend-exclude = ["*.md", ".worktrees"]
+extend-exclude = ["*.md", ".worktrees", ".claude"]
 
 [tool.ruff.lint]
 select = [
@@ -57,6 +57,9 @@ ban-relative-imports = "all"
 indent-style = "space"
 quote-style = "double"
 line-ending = "auto"
+
+[tool.ty.src]
+exclude = [".worktrees", ".claude"]
 
 [tool.ty.rules]
 possibly-missing-attribute = "error"
