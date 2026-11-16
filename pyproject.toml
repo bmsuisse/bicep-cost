@@ -16,13 +16,16 @@ bicep-cost = "bicep_cost.cli:main"
 
 [dependency-groups]
 dev = [
-    "ty>=0.0.89",
-    "ruff>=0.17.1",
+    "ty>=0.0.100",
+    "ruff>=0.17.4",
     "prek>=0.5.5",
 ]
 test = [
     "pytest>=9.1.0",
 ]
+
+[tool.uv]
+exclude-newer = "5 days"
 
 [tool.hatch.build.targets.wheel]
 packages = ["bicep_cost"]
@@ -34,7 +37,7 @@ pythonpath = ["."]
 line-length = 120
 indent-width = 4
 target-version = "py311"
-extend-exclude = ["*.md", ".worktrees"]
+extend-exclude = ["*.md", ".worktrees", ".claude"]
 
 [tool.ruff.lint]
 select = [
@@ -54,6 +57,9 @@ ban-relative-imports = "all"
 indent-style = "space"
 quote-style = "double"
 line-ending = "auto"
+
+[tool.ty.src]
+exclude = [".worktrees", ".claude"]
 
 [tool.ty.rules]
 possibly-missing-attribute = "error"
