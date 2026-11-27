@@ -878,6 +878,27 @@ def test_advisor_pages_are_followed() -> None:
     assert fetch_recommendations(az, SUB) == {"/x": [AdvisorRec("Cost", "Low", "p")]}
 
 
+def test_advisor_next_link_encodes_spaces_without_changing_existing_escapes() -> None:
+    next_link = (
+        "https://management.azure.com/next?api-version=2025-01-01"
+        "&$filter=Category eq %27Cost%27%20or Category%20eq%20%27Performance%27"
+        "&$skiptoken=opaque token%20part%2B%2f%3D+suffix"
+    )
+    expected_url = (
+        "https://management.azure.com/next?api-version=2025-01-01"
+        "&$filter=Category%20eq%20%27Cost%27%20or%20Category%20eq%20%27Performance%27"
+        "&$skiptoken=opaque%20token%20part%2B%2f%3D+suffix"
+    )
+    pages: Iterator[dict[str, object]] = iter([{"value": [], "nextLink": next_link}, {"value": []}])
+    az = FakeAzure()
+    az.on("management.azure.com", lambda url, body: next(pages))
+
+    assert fetch_recommendations(az, SUB) == {}
+
+    assert len(az.calls) == 2
+    assert az.calls[1] == f"GET {expected_url}"
+
+
 def test_advisor_failure_is_a_warning_not_an_error(prices: PriceClient) -> None:
     az = az_with(plan("plan1"))
     az.routes.insert(0, ("Microsoft.Advisor", AzureError("HTTP 403: no access")))
