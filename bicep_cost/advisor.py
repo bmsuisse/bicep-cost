@@ -53,5 +53,5 @@ def fetch_recommendations(transport: Transport, subscription_id: str) -> dict[st
                 if found[1] not in rec:
                     rec.append(found[1])
         next_link = payload.get("nextLink")
-        url = next_link if isinstance(next_link, str) and next_link else None
+        url = next_link.replace(" ", "%20") if isinstance(next_link, str) and next_link else None
     raise AzureError("too many Advisor result pages")
